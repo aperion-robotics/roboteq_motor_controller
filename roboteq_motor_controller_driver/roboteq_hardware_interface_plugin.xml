@@ -3,7 +3,7 @@
          type="roboteq_motor_controller_driver::RoboteqHardwareInterface"
          base_class_type="hardware_interface::SystemInterface">
     <description>
-		  ROS2 Control System Driver for the RoboteQ motor controller.
+		  ros2_control System Driver for the RoboteQ motor controller.
     </description>
   </class>
 </library>

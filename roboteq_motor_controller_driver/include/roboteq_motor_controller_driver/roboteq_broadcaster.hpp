@@ -1,12 +1,12 @@
 #ifndef ROBOTEQ_BROADCASTER_HPP_
 #define ROBOTEQ_BROADCASTER_HPP_
 
-#include "controller_interface/controller_interface.hpp"
-#include "rclcpp_lifecycle/lifecycle_publisher.hpp"
-#include "rclcpp_lifecycle/node_interfaces/lifecycle_node_interface.hpp"
 #include "realtime_tools/realtime_publisher.h"
+#include "rclcpp_lifecycle/lifecycle_publisher.hpp"
 #include "roboteq_hardware_interface_parameters.hpp"
 #include "roboteq_motor_controller_msgs/msg/query.hpp"
+#include "controller_interface/controller_interface.hpp"
+#include "rclcpp_lifecycle/node_interfaces/lifecycle_node_interface.hpp"
 
 namespace roboteq_broadcaster
 {

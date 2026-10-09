@@ -6,18 +6,18 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 # find dependencies
+find_package(serial REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(pluginlib REQUIRED)
 find_package(ament_cmake REQUIRED)
+find_package(realtime_tools REQUIRED)
+find_package(rclcpp_lifecycle REQUIRED)
 find_package(hardware_interface REQUIRED)
 find_package(controller_interface REQUIRED)
 find_package(transmission_interface REQUIRED)
-find_package(pluginlib REQUIRED)
-find_package(rclcpp REQUIRED)
-find_package(rclcpp_lifecycle REQUIRED)
-find_package(example_interfaces REQUIRED)
 find_package(generate_parameter_library REQUIRED)
-find_package(serial REQUIRED)
 find_package(roboteq_motor_controller_msgs REQUIRED)
-find_package(realtime_tools REQUIRED)
+
 # uncomment the following section in order to fill in
 # further dependencies manually.
 # find_package(<dependency> REQUIRED)
@@ -44,11 +44,11 @@ target_include_directories(roboteq_motor_controller_driver_plugin
 )
 
 ament_target_dependencies(roboteq_motor_controller_driver_plugin
-  rclcpp
+  serial
+  rclcpp  
   rclcpp_lifecycle
   hardware_interface
-  transmission_interface
-  serial
+  transmission_interface  
 )
 
 pluginlib_export_plugin_description_file(hardware_interface roboteq_hardware_interface_plugin.xml)
@@ -71,9 +71,9 @@ target_include_directories(roboteq_broadcaster_plugin
 
 ament_target_dependencies(roboteq_broadcaster_plugin
   rclcpp
-  rclcpp_lifecycle
-  controller_interface
   realtime_tools
+  rclcpp_lifecycle
+  controller_interface  
   roboteq_motor_controller_msgs
 )
 

@@ -4,7 +4,7 @@
   <name>roboteq_motor_controller_msgs</name>
   <version>0.0.0</version>
   <description>TODO: Package description</description>
-  <maintainer email="gargyropoulos@iknowhow.com">innovation</maintainer>
+  <maintainer email="gargyropoulos@aperionrobotics.com">Aperion Robotics</maintainer>
   <license>TODO: License declaration</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>

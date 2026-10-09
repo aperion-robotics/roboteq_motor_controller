@@ -9,27 +9,11 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(std_msgs REQUIRED)
-# uncomment the following section in order to fill in
-# further dependencies manually.
-# find_package(<dependency> REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/Query.msg"
   DEPENDENCIES std_msgs # Add packages that above messages depend on, in this case geometry_msgs for Sphere.msg
 )
-
-# add_executable(roboteq_motor_controller_driver_node
-#   src/roboteq_motor_controller_driver_node.cpp
-# )
-
-# target_include_directories(roboteq_motor_controller_driver_node PUBLIC
-#   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-#   $<INSTALL_INTERFACE:include>)
-# target_compile_features(roboteq_motor_controller_driver_node PUBLIC c_std_99 cxx_std_17)  # Require C99 and C++17
-
-# ament_target_dependencies(roboteq_motor_controller_driver_node
-#   rclcpp
-# )
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)

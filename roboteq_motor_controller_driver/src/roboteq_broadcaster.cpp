@@ -127,10 +127,11 @@ controller_interface::CallbackReturn RoboteqBroadcaster::on_activate(const rclcp
 		auto realtime_query_publisher = std::make_shared<realtime_tools::RealtimePublisher<roboteq_motor_controller_msgs::msg::Query>>(query_publisher);
 
 		// default initialization for query message
-		auto & query_msg = realtime_query_publisher->msg_;
+		roboteq_motor_controller_msgs::msg::Query query_msg;
 		query_msg.data.resize(size_found, kNaN);
 
 		realtime_roboteq_publishers_.push_back(realtime_query_publisher);
+		query_msgs_.push_back(query_msg);
 	}
 
 	return controller_interface::CallbackReturn::SUCCESS;
@@ -143,6 +144,7 @@ controller_interface::CallbackReturn RoboteqBroadcaster::on_deactivate(const rcl
 		publisher.reset();
 	}
 	realtime_roboteq_publishers_.clear();
+	query_msgs_.clear();
 
 	cumulative_state_interface_index.clear();
 
@@ -153,17 +155,19 @@ controller_interface::return_type RoboteqBroadcaster::update(const rclcpp::Time 
 {
 	for (size_t i = 0; i < realtime_roboteq_publishers_.size(); i++)
 	{
-		if (realtime_roboteq_publishers_[i]->trylock())
+		auto & query_msg = query_msgs_[i];
+		query_msg.header.stamp = time;
+		for (int j = cumulative_state_interface_index[i]; j < cumulative_state_interface_index[i+1]; j++)
 		{
-			auto & query_msg = realtime_roboteq_publishers_[i]->msg_;
-			query_msg.header.stamp = time;
-			for (int j = cumulative_state_interface_index[i]; j < cumulative_state_interface_index[i+1]; j++)
+			// keep the previous value if the state interface could not be read this cycle
+			const auto value = state_interfaces_[j].get_optional();
+			if (value.has_value())
 			{
-				query_msg.data[j - cumulative_state_interface_index[i]] = static_cast<int64_t>(state_interfaces_[j].get_value());
+				query_msg.data[j - cumulative_state_interface_index[i]] = static_cast<int64_t>(*value);
 			}
-
-			realtime_roboteq_publishers_[i]->unlockAndPublish();
 		}
+
+		realtime_roboteq_publishers_[i]->try_publish(query_msg);
 	}
 
 	return controller_interface::return_type::OK;

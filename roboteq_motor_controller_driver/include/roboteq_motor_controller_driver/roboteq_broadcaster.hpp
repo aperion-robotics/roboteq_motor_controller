@@ -1,9 +1,9 @@
 #ifndef ROBOTEQ_BROADCASTER_HPP_
 #define ROBOTEQ_BROADCASTER_HPP_
 
-#include "realtime_tools/realtime_publisher.h"
+#include "realtime_tools/realtime_publisher.hpp"
 #include "rclcpp_lifecycle/lifecycle_publisher.hpp"
-#include "roboteq_hardware_interface_parameters.hpp"
+#include "roboteq_motor_controller_driver/roboteq_hardware_interface_parameters.hpp"
 #include "roboteq_motor_controller_msgs/msg/query.hpp"
 #include "controller_interface/controller_interface.hpp"
 #include "rclcpp_lifecycle/node_interfaces/lifecycle_node_interface.hpp"
@@ -34,6 +34,7 @@ private:
 
 	// Publishers
   	std::vector<std::shared_ptr<realtime_tools::RealtimePublisher<roboteq_motor_controller_msgs::msg::Query>>> realtime_roboteq_publishers_;
+	std::vector<roboteq_motor_controller_msgs::msg::Query> query_msgs_;
 	std::vector<int> cumulative_state_interface_index;
 };
 } // namespace roboteq_broadcaster

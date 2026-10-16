@@ -13,7 +13,7 @@
 #include <serial/serial.h>
 #include "rclcpp_lifecycle/node_interfaces/lifecycle_node_interface.hpp"
 #include "rclcpp_lifecycle/state.hpp"
-#include "roboteq_hardware_interface_parameters.hpp"
+#include "roboteq_motor_controller_driver/roboteq_hardware_interface_parameters.hpp"
 
 namespace roboteq_motor_controller_driver
 {
@@ -27,7 +27,7 @@ public:
 	RCLCPP_SHARED_PTR_DEFINITIONS(RoboteqHardwareInterface)
 	virtual ~RoboteqHardwareInterface();
 
-	hardware_interface::CallbackReturn on_init(const hardware_interface::HardwareInfo& info) override;
+	hardware_interface::CallbackReturn on_init(const hardware_interface::HardwareComponentInterfaceParams& params) override;
 	hardware_interface::CallbackReturn on_configure(const rclcpp_lifecycle::State & previous_state) override;
 	hardware_interface::CallbackReturn on_activate(const rclcpp_lifecycle::State& previous_state) override;
 	hardware_interface::CallbackReturn on_deactivate(const rclcpp_lifecycle::State& previous_state) override;

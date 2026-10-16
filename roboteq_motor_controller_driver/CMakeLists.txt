@@ -1,107 +1,99 @@
-cmake_minimum_required(VERSION 3.8)
-project(roboteq_motor_controller_driver)
+cmake_minimum_required(VERSION 3.16)
+project(roboteq_motor_controller_driver LANGUAGES CXX)
 
-if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
-# find dependencies
-find_package(serial REQUIRED)
-find_package(rclcpp REQUIRED)
-find_package(pluginlib REQUIRED)
-find_package(ament_cmake REQUIRED)
-find_package(realtime_tools REQUIRED)
-find_package(rclcpp_lifecycle REQUIRED)
-find_package(hardware_interface REQUIRED)
-find_package(controller_interface REQUIRED)
-find_package(transmission_interface REQUIRED)
-find_package(generate_parameter_library REQUIRED)
-find_package(roboteq_motor_controller_msgs REQUIRED)
+set(THIS_PACKAGE_INCLUDE_DEPENDS
+  serial
+  rclcpp
+  pluginlib
+  realtime_tools
+  rclcpp_lifecycle
+  hardware_interface
+  controller_interface
+  transmission_interface
+  generate_parameter_library
+  roboteq_motor_controller_msgs
+)
 
-# uncomment the following section in order to fill in
-# further dependencies manually.
-# find_package(<dependency> REQUIRED)
+# find dependencies
+find_package(ament_cmake REQUIRED)
+foreach(dependency IN ITEMS ${THIS_PACKAGE_INCLUDE_DEPENDS})
+  find_package(${dependency} REQUIRED)
+endforeach()
 
 generate_parameter_library(
   roboteq_hardware_interface_parameters # cmake target name for the parameter library
   src/roboteq_hardware_interface_parameters.yaml # path to input yaml file
 )
 
-add_library(roboteq_motor_controller_driver_plugin
-  SHARED
+# hardware interface plugin
+add_library(roboteq_motor_controller_driver_plugin SHARED
   src/roboteq_hardware_interface.cpp
 )
-
-target_link_libraries(roboteq_motor_controller_driver_plugin
-  rclcpp::rclcpp
-  roboteq_hardware_interface_parameters
-)
-
-target_include_directories(roboteq_motor_controller_driver_plugin
-  PUBLIC
+target_include_directories(roboteq_motor_controller_driver_plugin PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>
+  $<INSTALL_INTERFACE:include/${PROJECT_NAME}>
 )
-
-ament_target_dependencies(roboteq_motor_controller_driver_plugin
-  serial
-  rclcpp  
-  rclcpp_lifecycle
-  hardware_interface
-  transmission_interface  
+target_link_libraries(roboteq_motor_controller_driver_plugin
+  PUBLIC
+    roboteq_hardware_interface_parameters
+    serial::serial
+    rclcpp::rclcpp
+    rclcpp_lifecycle::rclcpp_lifecycle
+    hardware_interface::hardware_interface
+    transmission_interface::transmission_interface
+  PRIVATE
+    pluginlib::pluginlib
 )
 
 pluginlib_export_plugin_description_file(hardware_interface roboteq_hardware_interface_plugin.xml)
 
-add_library(roboteq_broadcaster_plugin
-  SHARED
+# broadcaster controller plugin
+add_library(roboteq_broadcaster_plugin SHARED
   src/roboteq_broadcaster.cpp
 )
-
-target_link_libraries(roboteq_broadcaster_plugin
-  rclcpp::rclcpp
-  roboteq_hardware_interface_parameters
-)
-
-target_include_directories(roboteq_broadcaster_plugin
-  PUBLIC
+target_include_directories(roboteq_broadcaster_plugin PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>
+  $<INSTALL_INTERFACE:include/${PROJECT_NAME}>
 )
-
-ament_target_dependencies(roboteq_broadcaster_plugin
-  rclcpp
-  realtime_tools
-  rclcpp_lifecycle
-  controller_interface  
-  roboteq_motor_controller_msgs
+target_link_libraries(roboteq_broadcaster_plugin
+  PUBLIC
+    roboteq_hardware_interface_parameters
+    rclcpp::rclcpp
+    rclcpp_lifecycle::rclcpp_lifecycle
+    realtime_tools::realtime_tools
+    controller_interface::controller_interface
+    ${roboteq_motor_controller_msgs_TARGETS}
+  PRIVATE
+    pluginlib::pluginlib
 )
 
 pluginlib_export_plugin_description_file(controller_interface roboteq_broadcaster_plugin.xml)
 
-install(DIRECTORY launch 
-  DESTINATION share/${PROJECT_NAME}
-)
-
-install(DIRECTORY config 
-  DESTINATION share/${PROJECT_NAME}
-)
-
-install(DIRECTORY include 
+# install
+install(
+  DIRECTORY include/
   DESTINATION include/${PROJECT_NAME}
 )
 
-install(TARGETS roboteq_motor_controller_driver_plugin
-  DESTINATION lib/${PROJECT_NAME}
+install(
+  DIRECTORY config launch
+  DESTINATION share/${PROJECT_NAME}
 )
 
-install(TARGETS roboteq_broadcaster_plugin
-  DESTINATION lib/${PROJECT_NAME}
+install(
+  TARGETS
+    roboteq_motor_controller_driver_plugin
+    roboteq_broadcaster_plugin
+    roboteq_hardware_interface_parameters
+  EXPORT export_${PROJECT_NAME}
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
 )
-
-ament_export_libraries(roboteq_motor_controller_driver_plugin)
-
-ament_export_libraries(roboteq_broadcaster_plugin)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
@@ -115,4 +107,6 @@ if(BUILD_TESTING)
   ament_lint_auto_find_test_dependencies()
 endif()
 
+ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
+ament_export_dependencies(${THIS_PACKAGE_INCLUDE_DEPENDS})
 ament_package()

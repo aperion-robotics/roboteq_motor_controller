@@ -1,3 +1,5 @@
+#include <cmath>
+
 #include <roboteq_motor_controller_driver/roboteq_broadcaster.hpp>
 
 static const rclcpp::Logger LOGGER = rclcpp::get_logger("RoboteqBroadcaster");
@@ -11,6 +13,8 @@ constexpr int kNaN = std::numeric_limits<int>::quiet_NaN();
 controller_interface::CallbackReturn RoboteqBroadcaster::on_init()
 {
 	
+	auto_declare<std::string>("hardware_name", "");
+
 	param_listener_ = std::make_shared<roboteq_motor_controller_driver::ParamListener>(get_node());
 	params_ = param_listener_->get_params();
 
@@ -54,6 +58,13 @@ controller_interface::CallbackReturn RoboteqBroadcaster::on_init()
 
 controller_interface::CallbackReturn RoboteqBroadcaster::on_configure(const rclcpp_lifecycle::State & /*previous_state*/)
 {
+	hardware_name_ = get_node()->get_parameter("hardware_name").as_string();
+	if (hardware_name_.empty())
+	{
+		RCLCPP_ERROR(LOGGER, "'hardware_name' parameter is empty. Set it to the name of the Roboteq ros2_control hardware component.");
+		return controller_interface::CallbackReturn::ERROR;
+	}
+
 	return controller_interface::CallbackReturn::SUCCESS;
 }
 
@@ -161,7 +172,7 @@ controller_interface::return_type RoboteqBroadcaster::update(const rclcpp::Time 
 		{
 			// keep the previous value if the state interface could not be read this cycle
 			const auto value = state_interfaces_[j].get_optional();
-			if (value.has_value())
+			if (value.has_value() && !std::isnan(*value))
 			{
 				query_msg.data[j - cumulative_state_interface_index[i]] = static_cast<int64_t>(*value);
 			}
@@ -188,7 +199,7 @@ controller_interface::InterfaceConfiguration RoboteqBroadcaster::state_interface
 	{
 		for (int i = 0; i < map_item.second.size; ++i)
 		{
-			state_interfaces_config.names.push_back("gpio/" + map_item.second.name + "_" + std::to_string(i));	
+			state_interfaces_config.names.push_back(hardware_name_ + "/" + map_item.second.name + "_" + std::to_string(i));	
 		}
 	}	
 

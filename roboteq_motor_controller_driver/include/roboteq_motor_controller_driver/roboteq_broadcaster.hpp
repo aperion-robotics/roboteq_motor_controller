@@ -31,6 +31,7 @@ private:
 	// ROS params
 	std::shared_ptr<roboteq_motor_controller_driver::ParamListener> param_listener_;
 	roboteq_motor_controller_driver::Params params_;
+	std::string hardware_name_;
 
 	// Publishers
   	std::vector<std::shared_ptr<realtime_tools::RealtimePublisher<roboteq_motor_controller_msgs::msg::Query>>> realtime_roboteq_publishers_;

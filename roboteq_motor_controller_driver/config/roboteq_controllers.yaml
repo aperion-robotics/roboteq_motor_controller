@@ -12,6 +12,12 @@ controller_manager:
       type: roboteq_broadcaster/RoboteqBroadcaster
 
 
+roboteq_broadcaster:
+  ros__parameters:
+    # TODO: set to the name attribute of the Roboteq <ros2_control name="..."> tag in the URDF
+    hardware_name: ""
+
+
 diff_drive_controller:
   ros__parameters:
     left_wheel_names: ["vojext_left_wheel_joint"]

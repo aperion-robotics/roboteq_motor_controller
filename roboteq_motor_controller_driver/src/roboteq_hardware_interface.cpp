@@ -1,4 +1,10 @@
-#include <math.h>
+#include <algorithm>
+#include <charconv>
+#include <cmath>
+#include <limits>
+#include <string_view>
+#include <tuple>
+#include <unordered_set>
 
 #include <roboteq_motor_controller_driver/roboteq_hardware_interface.hpp>
 
@@ -6,71 +12,75 @@
 #include "transmission_interface/simple_transmission_loader.hpp"
 #include "transmission_interface/transmission_interface_exception.hpp"
 
-static const rclcpp::Logger LOGGER = rclcpp::get_logger("RoboteqHardwareInterface");
-
 namespace roboteq_motor_controller_driver
 {
 
 constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
+constexpr int kThrottleMs = 1000;
+constexpr size_t kMaxLineSize = 65536;
+constexpr const char* kEol = "\r";
+constexpr size_t kChannels = 2;
 
 RoboteqHardwareInterface::~RoboteqHardwareInterface()
 {
-	// If the controller manager is shutdown via Ctrl + C the on_deactivate methods won't be called.
-	// We therefore need to make sure to actually deactivate the communication
-	on_deactivate(rclcpp_lifecycle::State());
+	// If the controller manager is shutdown via Ctrl + C the on_cleanup/on_shutdown methods won't be called.
+	// We therefore need to make sure to actually close the communication
+	close_serial();
 }
 
 hardware_interface::CallbackReturn RoboteqHardwareInterface::on_init(const hardware_interface::HardwareComponentInterfaceParams& params)
 {
-	if (hardware_interface::SystemInterface::on_init(params) !=hardware_interface::CallbackReturn::SUCCESS) 
+	if (hardware_interface::SystemInterface::on_init(params) != hardware_interface::CallbackReturn::SUCCESS)
 	{
 		return hardware_interface::CallbackReturn::ERROR;
 	}
 
-	if (info_.joints.size() != 2)
+	if (info_.joints.size() != kChannels)
 	{
-		RCLCPP_FATAL(LOGGER, "%zu joints found. 2 were expected.", info_.joints.size());
+		RCLCPP_FATAL(get_logger(), "%zu joints found. %zu were expected.", info_.joints.size(), kChannels);
 		return hardware_interface::CallbackReturn::ERROR;
 	}
+
+	joint_names_.assign(kChannels, "");
 
 	for (const hardware_interface::ComponentInfo& joint : info_.joints)
 	{
-		if (joint.command_interfaces.size() != 2) 
+		if (joint.command_interfaces.size() != 2)
 		{
-			RCLCPP_FATAL(LOGGER, "Joint '%s' has %zu command interfaces. 2 expected.", joint.name.c_str(), joint.command_interfaces.size());
+			RCLCPP_FATAL(get_logger(), "Joint '%s' has %zu command interfaces. 2 expected.", joint.name.c_str(), joint.command_interfaces.size());
 			return hardware_interface::CallbackReturn::ERROR;
 		}
 
-		if (joint.command_interfaces[0].name != hardware_interface::HW_IF_POSITION) 
+		if (joint.command_interfaces[0].name != hardware_interface::HW_IF_POSITION)
 		{
-			RCLCPP_FATAL(LOGGER, "Joint '%s' has %s command interface as first command interface. '%s' expected.",
+			RCLCPP_FATAL(get_logger(), "Joint '%s' has %s command interface as first command interface. '%s' expected.",
 						joint.name.c_str(), joint.command_interfaces[0].name.c_str(), hardware_interface::HW_IF_POSITION);
 			return hardware_interface::CallbackReturn::ERROR;
 		}
 
-		if (joint.command_interfaces[1].name != hardware_interface::HW_IF_VELOCITY) 
+		if (joint.command_interfaces[1].name != hardware_interface::HW_IF_VELOCITY)
 		{
-			RCLCPP_FATAL(LOGGER, "Joint '%s' has %s command interface as second command interface. '%s' expected.",
+			RCLCPP_FATAL(get_logger(), "Joint '%s' has %s command interface as second command interface. '%s' expected.",
 						joint.name.c_str(), joint.command_interfaces[1].name.c_str(), hardware_interface::HW_IF_VELOCITY);
 			return hardware_interface::CallbackReturn::ERROR;
 		}
 
-		if (joint.state_interfaces.size() != 2) 
+		if (joint.state_interfaces.size() != 2)
 		{
-			RCLCPP_FATAL(LOGGER, "Joint '%s' has %zu state interfaces. 2 expected.",	joint.name.c_str(), joint.state_interfaces.size());
+			RCLCPP_FATAL(get_logger(), "Joint '%s' has %zu state interfaces. 2 expected.", joint.name.c_str(), joint.state_interfaces.size());
 			return hardware_interface::CallbackReturn::ERROR;
 		}
 
-		if (joint.state_interfaces[0].name != hardware_interface::HW_IF_POSITION) 
+		if (joint.state_interfaces[0].name != hardware_interface::HW_IF_POSITION)
 		{
-			RCLCPP_FATAL(LOGGER,"Joint '%s' has %s state interface as first state interface. '%s' expected.", joint.name.c_str(),
+			RCLCPP_FATAL(get_logger(), "Joint '%s' has %s state interface as first state interface. '%s' expected.", joint.name.c_str(),
 						joint.state_interfaces[0].name.c_str(), hardware_interface::HW_IF_POSITION);
 			return hardware_interface::CallbackReturn::ERROR;
 		}
 
-		if (joint.state_interfaces[1].name != hardware_interface::HW_IF_VELOCITY) 
+		if (joint.state_interfaces[1].name != hardware_interface::HW_IF_VELOCITY)
 		{
-			RCLCPP_FATAL(LOGGER, "Joint '%s' has %s state interface as second state interface. '%s' expected.", joint.name.c_str(),
+			RCLCPP_FATAL(get_logger(), "Joint '%s' has %s state interface as second state interface. '%s' expected.", joint.name.c_str(),
 						joint.state_interfaces[1].name.c_str(), hardware_interface::HW_IF_VELOCITY);
 			return hardware_interface::CallbackReturn::ERROR;
 		}
@@ -78,43 +88,39 @@ hardware_interface::CallbackReturn RoboteqHardwareInterface::on_init(const hardw
 		const auto map_iterator = joint.parameters.find("channel");
 		if (map_iterator == joint.parameters.end())
 		{
-			RCLCPP_FATAL(LOGGER, "Joint '%s' no channel parameter.", joint.name.c_str());
-			return hardware_interface::CallbackReturn::ERROR;	
+			RCLCPP_FATAL(get_logger(), "Joint '%s' no channel parameter.", joint.name.c_str());
+			return hardware_interface::CallbackReturn::ERROR;
 		}
 		else if (map_iterator->second != "1" && map_iterator->second != "2")
 		{
-			RCLCPP_FATAL(LOGGER, "Joint '%s' has %s as the channel parameter. 1 or 2 expected.", joint.name.c_str(), map_iterator->second.c_str());
+			RCLCPP_FATAL(get_logger(), "Joint '%s' has %s as the channel parameter. 1 or 2 expected.", joint.name.c_str(), map_iterator->second.c_str());
 			return hardware_interface::CallbackReturn::ERROR;
 		}
+
+		// Convert channel to vector index
+		const size_t index = (map_iterator->second == "1") ? 0 : 1;
+		if (!joint_names_[index].empty())
+		{
+			RCLCPP_FATAL(get_logger(), "Both joints have the same channel parameter. Different channels expected.");
+			return hardware_interface::CallbackReturn::ERROR;
+		}
+		joint_names_[index] = joint.name;
 	}
 
-	if (info_.joints[0].parameters["channel"] == info_.joints[1].parameters["channel"])
+	if (info_.transmissions.size() != kChannels)
 	{
-		RCLCPP_FATAL(LOGGER, "Both joints have the same channel parameter. Different channels expected.");
-		return hardware_interface::CallbackReturn::ERROR;
-	}
-
-	if (info_.transmissions.size() != 2)
-	{
-		RCLCPP_FATAL(LOGGER, "%zu transmissions found. 2 were expected.", info_.transmissions.size());
-		return hardware_interface::CallbackReturn::ERROR;
-	}
-
-	if (info_.transmissions[0].joints[0].name == info_.transmissions[1].joints[0].name)
-	{
-		RCLCPP_FATAL(LOGGER, "Both transmissions have the same joint. Different joints expected.");
+		RCLCPP_FATAL(get_logger(), "%zu transmissions found. %zu were expected.", info_.transmissions.size(), kChannels);
 		return hardware_interface::CallbackReturn::ERROR;
 	}
 
 	// reserve the space needed for vectors
-	position_commands_.resize(2);
-	velocity_commands_.resize(2);
-	joint_positions_.resize(2);
-	joint_velocities_.resize(2);
-	joints_position_transmission_passthrough_.resize(2);
-	joints_velocity_transmission_passthrough_.resize(2);
-	actuators_position_transmission_passthrough_.resize(2);
-	actuators_velocity_transmission_passthrough_.resize(2);
+	transmissions_.assign(kChannels, nullptr);
+	joints_position_transmission_passthrough_.assign(kChannels, kNaN);
+	joints_velocity_transmission_passthrough_.assign(kChannels, kNaN);
+	actuators_position_transmission_passthrough_.assign(kChannels, kNaN);
+	actuators_velocity_transmission_passthrough_.assign(kChannels, kNaN);
+	actuator_position_counts_.assign(kChannels, 0);
+	last_position_commands_.assign(kChannels, kNaN);
 
 	// create transmissions, joint and actuator handles
 	auto transmission_loader = transmission_interface::SimpleTransmissionLoader();
@@ -124,158 +130,234 @@ hardware_interface::CallbackReturn RoboteqHardwareInterface::on_init(const hardw
 		// only simple transmissions are supported
 		if (transmission_info.type != "transmission_interface/SimpleTransmission")
 		{
-			RCLCPP_FATAL(LOGGER, "Transmission '%s' of type '%s' not supported.",
+			RCLCPP_FATAL(get_logger(), "Transmission '%s' of type '%s' not supported.",
 				transmission_info.name.c_str(), transmission_info.type.c_str());
 			return hardware_interface::CallbackReturn::ERROR;
 		}
 
 		if (transmission_info.joints.size() != 1)
 		{
-			RCLCPP_FATAL(LOGGER, "%zu joints found in transmission %s. 1 was expected.", transmission_info.joints.size(), transmission_info.name.c_str());
+			RCLCPP_FATAL(get_logger(), "%zu joints found in transmission %s. 1 was expected.", transmission_info.joints.size(), transmission_info.name.c_str());
 			return hardware_interface::CallbackReturn::ERROR;
 		}
 
 		if (transmission_info.actuators.size() != 1)
 		{
-			RCLCPP_FATAL(LOGGER, "%zu actuators found in transmission %s. 1 was expected.", transmission_info.actuators.size(), transmission_info.name.c_str());
+			RCLCPP_FATAL(get_logger(), "%zu actuators found in transmission %s. 1 was expected.", transmission_info.actuators.size(), transmission_info.name.c_str());
 			return hardware_interface::CallbackReturn::ERROR;
 		}
 
-		const auto joint_match = std::find_if(info_.joints.cbegin(), info_.joints.cend(), [&](const auto & joint) { return joint.name == transmission_info.joints[0].name;});
-
-		if(joint_match == info_.joints.cend())
+		const auto joint_match = std::find(joint_names_.cbegin(), joint_names_.cend(), transmission_info.joints[0].name);
+		if (joint_match == joint_names_.cend())
 		{
-			RCLCPP_FATAL(LOGGER, "No match for joint %s in transmission %s.", transmission_info.joints[0].name.c_str(), transmission_info.name.c_str());
+			RCLCPP_FATAL(get_logger(), "No match for joint %s in transmission %s.", transmission_info.joints[0].name.c_str(), transmission_info.name.c_str());
 			return hardware_interface::CallbackReturn::ERROR;
 		}
-		
-		// Convert channel to vector index
-		const int index = std::stoi(joint_match->parameters.at("channel")) - 1;
 
-		std::shared_ptr<transmission_interface::Transmission> position_transmission;
-		std::shared_ptr<transmission_interface::Transmission> velocity_transmission;
-		
+		const size_t index = std::distance(joint_names_.cbegin(), joint_match);
+		if (transmissions_[index])
+		{
+			RCLCPP_FATAL(get_logger(), "Both transmissions have the same joint. Different joints expected.");
+			return hardware_interface::CallbackReturn::ERROR;
+		}
+
+		std::shared_ptr<transmission_interface::Transmission> transmission;
 		try
 		{
-			position_transmission = transmission_loader.load(transmission_info);
-			velocity_transmission = transmission_loader.load(transmission_info);
+			transmission = transmission_loader.load(transmission_info);
 		}
 		catch (const transmission_interface::TransmissionInterfaceException & exc)
 		{
-			RCLCPP_FATAL(LOGGER, "Error while loading %s: %s", transmission_info.name.c_str(), exc.what());
+			RCLCPP_FATAL(get_logger(), "Error while loading %s: %s", transmission_info.name.c_str(), exc.what());
 			return hardware_interface::CallbackReturn::ERROR;
 		}
 
-		std::vector<transmission_interface::JointHandle> joint_position_handles;
-		transmission_interface::JointHandle joint_position_handle(transmission_info.joints[0].name, hardware_interface::HW_IF_POSITION, &(joints_position_transmission_passthrough_[index]));
-		joint_position_handles.push_back(joint_position_handle);
+		const std::string& joint_name = transmission_info.joints[0].name;
+		const std::string& actuator_name = transmission_info.actuators[0].name;
 
-		std::vector<transmission_interface::JointHandle> joint_velocity_handles;
-		transmission_interface::JointHandle joint_velocity_handle(transmission_info.joints[0].name, hardware_interface::HW_IF_VELOCITY, &(joints_velocity_transmission_passthrough_[index]));
-		joint_velocity_handles.push_back(joint_velocity_handle);
+		// A single transmission handles both the position and the velocity interfaces of the joint
+		const std::vector<transmission_interface::JointHandle> joint_handles{
+			transmission_interface::JointHandle(joint_name, hardware_interface::HW_IF_POSITION, &joints_position_transmission_passthrough_[index]),
+			transmission_interface::JointHandle(joint_name, hardware_interface::HW_IF_VELOCITY, &joints_velocity_transmission_passthrough_[index])};
 
-		std::vector<transmission_interface::ActuatorHandle> actuator_position_handles;
-		transmission_interface::ActuatorHandle actuator_position_handle(transmission_info.actuators[0].name, hardware_interface::HW_IF_POSITION, &(actuators_position_transmission_passthrough_[index]));
-		actuator_position_handles.push_back(actuator_position_handle);
-
-		std::vector<transmission_interface::ActuatorHandle> actuator_velocity_handles;
-		transmission_interface::ActuatorHandle actuator_velocity_handle(transmission_info.actuators[0].name, hardware_interface::HW_IF_VELOCITY, &(actuators_velocity_transmission_passthrough_[index]));
-		actuator_velocity_handles.push_back(actuator_velocity_handle);
+		const std::vector<transmission_interface::ActuatorHandle> actuator_handles{
+			transmission_interface::ActuatorHandle(actuator_name, hardware_interface::HW_IF_POSITION, &actuators_position_transmission_passthrough_[index]),
+			transmission_interface::ActuatorHandle(actuator_name, hardware_interface::HW_IF_VELOCITY, &actuators_velocity_transmission_passthrough_[index])};
 
 		try
 		{
-			position_transmission->configure(joint_position_handles, actuator_position_handles);
-			velocity_transmission->configure(joint_velocity_handles, actuator_velocity_handles);
+			transmission->configure(joint_handles, actuator_handles);
 		}
 		catch (const transmission_interface::TransmissionInterfaceException & exc)
 		{
-			RCLCPP_FATAL(LOGGER, "Error while configuring %s: %s", transmission_info.name.c_str(), exc.what());
+			RCLCPP_FATAL(get_logger(), "Error while configuring %s: %s", transmission_info.name.c_str(), exc.what());
 			return hardware_interface::CallbackReturn::ERROR;
 		}
 
-		position_transmissions_.push_back(position_transmission);
-		velocity_transmissions_.push_back(velocity_transmission);
+		transmissions_[index] = transmission;
 	}
 
-	// Create the parameter listener and get the parameters
-	rclcpp::Node::SharedPtr node = rclcpp::Node::make_shared("roboteq_hardware_interface_temp_node");
-    std::shared_ptr<ParamListener> param_listener = std::make_shared<ParamListener>(node);
-    params_ = param_listener->get_params();
-
-	if (std::find(params_.queries_list.begin(), params_.queries_list.end(), "CR") != params_.queries_list.end())
+	// Get the parameters from the node created by the framework for this hardware component
+	if (!get_node())
 	{
-		position_query_ = "CR";
+		RCLCPP_FATAL(get_logger(), "Hardware component node is not available. Cannot read parameters.");
+		return hardware_interface::CallbackReturn::ERROR;
 	}
-	else if (std::find(params_.queries_list.begin(), params_.queries_list.end(), "BCR") != params_.queries_list.end())
+
+	try
 	{
-		position_query_ = "BCR";
+		param_listener_ = std::make_shared<ParamListener>(get_node());
+		params_ = param_listener_->get_params();
+	}
+	catch (const std::exception & exc)
+	{
+		RCLCPP_FATAL(get_logger(), "Error while reading parameters: %s", exc.what());
+		return hardware_interface::CallbackReturn::ERROR;
+	}
+
+	const auto contains_query = [this](const std::string& query)
+	{
+		return std::find(params_.queries_list.begin(), params_.queries_list.end(), query) != params_.queries_list.end();
+	};
+
+	std::string position_query;
+	if (contains_query("CR"))
+	{
+		position_query = "CR";
+	}
+	else if (contains_query("BCR"))
+	{
+		position_query = "BCR";
 	}
 	else
 	{
-		RCLCPP_WARN(LOGGER, "No relative position query found. Defaulting to BCR");
+		RCLCPP_WARN(get_logger(), "No relative position query found. Defaulting to BCR");
 		params_.queries_list.push_back("BCR");
-		roboteq_motor_controller_driver::Params::Queries::MapQueriesList bcr_struct;
+		Params::Queries::MapQueriesList bcr_struct;
 		bcr_struct.name = "internal_sensor_count_relative";
-		bcr_struct.size = 2;
+		bcr_struct.size = kChannels;
 		params_.queries.queries_list_map.insert({"BCR", bcr_struct});
-		position_query_ = "BCR";
+		position_query = "BCR";
 	}
 
-	if (std::find(params_.queries_list.begin(), params_.queries_list.end(), "S") != params_.queries_list.end())
+	std::string velocity_query;
+	if (contains_query("S"))
 	{
-		velocity_query_ = "S";
+		velocity_query = "S";
 	}
-	else if (std::find(params_.queries_list.begin(), params_.queries_list.end(), "BS") != params_.queries_list.end())
+	else if (contains_query("BS"))
 	{
-		velocity_query_ = "BS";
+		velocity_query = "BS";
 	}
 	else
 	{
-		RCLCPP_WARN(LOGGER, "No speed query found. Defaulting to BS");
+		RCLCPP_WARN(get_logger(), "No speed query found. Defaulting to BS");
 		params_.queries_list.push_back("BS");
-		roboteq_motor_controller_driver::Params::Queries::MapQueriesList bs_struct;
+		Params::Queries::MapQueriesList bs_struct;
 		bs_struct.name = "internal_sensor_motor_speed";
-		bs_struct.size = 2;
+		bs_struct.size = kChannels;
 		params_.queries.queries_list_map.insert({"BS", bs_struct});
-		velocity_query_ = "BS";
+		velocity_query = "BS";
 	}
 
-	// Check for duplicate names
+	// Check for duplicate names and allocate the query buffers
 	std::unordered_set<std::string> name_set;
-	for (auto& map_item : params_.queries.queries_list_map)
+	queries_.clear();
+	for (const auto& [query, map_item] : params_.queries.queries_list_map)
 	{
-		if (!name_set.insert(map_item.second.name).second)
+		if (!name_set.insert(map_item.name).second)
 		{
-			RCLCPP_FATAL(LOGGER, "Found duplicate name (%s) in queries. Each query name should be unique.", map_item.second.name.c_str());
+			RCLCPP_FATAL(get_logger(), "Found duplicate name (%s) in queries. Each query name should be unique.", map_item.name.c_str());
 			return hardware_interface::CallbackReturn::ERROR;
 		}
-		map_item.second.values.resize(map_item.second.size);
+
+		QueryState state;
+		state.name = map_item.name;
+		state.values.assign(map_item.size, kNaN);
+		queries_.emplace(query, std::move(state));
 	}
 
+	// Pointers to unordered_map elements remain valid as long as the element is not erased
+	position_query_ = &queries_.at(position_query);
+	velocity_query_ = &queries_.at(velocity_query);
+
+	if (position_query_->values.size() < kChannels || velocity_query_->values.size() < kChannels)
+	{
+		RCLCPP_FATAL(get_logger(), "Queries '%s' and '%s' must have a size of at least %zu.", position_query.c_str(), velocity_query.c_str(), kChannels);
+		return hardware_interface::CallbackReturn::ERROR;
+	}
+
+	serial_query_.clear();
 	for (const auto& query : params_.queries_list)
 	{
-		serial_query_ << "?" << query << "_";
+		serial_query_ += "?" + query + "_";
 	}
 
+	queries_response_list_.reserve(2 * params_.queries_list.size());
+	serial_command_.reserve(64);
+
 	return hardware_interface::CallbackReturn::SUCCESS;
+}
+
+std::vector<hardware_interface::InterfaceDescription> RoboteqHardwareInterface::export_unlisted_state_interface_descriptions()
+{
+	std::vector<hardware_interface::InterfaceDescription> descriptions;
+	for (const auto& [query, state] : queries_)
+	{
+		for (size_t i = 0; i < state.values.size(); ++i)
+		{
+			hardware_interface::InterfaceInfo interface_info{};
+			interface_info.name = state.name + "_" + std::to_string(i);
+			interface_info.data_type = "double";
+			descriptions.emplace_back(info_.name, interface_info);
+		}
+	}
+	return descriptions;
 }
 
 hardware_interface::CallbackReturn RoboteqHardwareInterface::on_configure(const rclcpp_lifecycle::State & /*previous_state*/)
 {
-	for (size_t i = 0; i != joints_position_transmission_passthrough_.size(); ++i)
+	// Cache the interface handles so that read/write don't need to look them up by name
+	try
 	{
-		joint_positions_[i] = 0.0;
+		position_state_handles_.clear();
+		velocity_state_handles_.clear();
+		position_command_handles_.clear();
+		velocity_command_handles_.clear();
+		for (const auto& joint_name : joint_names_)
+		{
+			position_state_handles_.push_back(get_state_interface_handle(joint_name + "/" + hardware_interface::HW_IF_POSITION));
+			velocity_state_handles_.push_back(get_state_interface_handle(joint_name + "/" + hardware_interface::HW_IF_VELOCITY));
+			position_command_handles_.push_back(get_command_interface_handle(joint_name + "/" + hardware_interface::HW_IF_POSITION));
+			velocity_command_handles_.push_back(get_command_interface_handle(joint_name + "/" + hardware_interface::HW_IF_VELOCITY));
+		}
+
+		for (auto& [query, state] : queries_)
+		{
+			state.handles.clear();
+			for (size_t i = 0; i < state.values.size(); ++i)
+			{
+				state.handles.push_back(get_state_interface_handle(info_.name + "/" + state.name + "_" + std::to_string(i)));
+			}
+		}
+	}
+	catch (const std::exception & exc)
+	{
+		RCLCPP_ERROR(get_logger(), "Failed to get interface handles: %s", exc.what());
+		return hardware_interface::CallbackReturn::ERROR;
+	}
+
+	for (size_t i = 0; i < kChannels; ++i)
+	{
+		actuator_position_counts_[i] = 0;
 		joints_position_transmission_passthrough_[i] = kNaN;
 		joints_velocity_transmission_passthrough_[i] = kNaN;
 		actuators_position_transmission_passthrough_[i] = kNaN;
 		actuators_velocity_transmission_passthrough_[i] = kNaN;
+		std::ignore = set_state(position_state_handles_[i], 0.0, true);
+		std::ignore = set_state(velocity_state_handles_[i], 0.0, true);
 	}
 
-	return hardware_interface::CallbackReturn::SUCCESS;
-}
-
-hardware_interface::CallbackReturn RoboteqHardwareInterface::on_activate(const rclcpp_lifecycle::State & /*previous_state*/)
-{
 	try
 	{
 		ser_.setPort(params_.serial.port);
@@ -284,217 +366,203 @@ hardware_interface::CallbackReturn RoboteqHardwareInterface::on_activate(const r
 		ser_.setTimeout(to);
 		ser_.open();
 	}
-	catch (serial::IOException &e)
+	catch (const std::exception & exc)
 	{
-		RCLCPP_ERROR(LOGGER, "Unable to open port");
-		return hardware_interface::CallbackReturn::ERROR;
+		RCLCPP_ERROR(get_logger(), "Unable to open port %s: %s", params_.serial.port.c_str(), exc.what());
+		return hardware_interface::CallbackReturn::FAILURE;
 	}
 
-	if (ser_.isOpen())
+	if (!ser_.isOpen())
 	{
-		RCLCPP_INFO(LOGGER, "Serial Port initialized");
-		// Disable echo and clear buffer history
-		std::stringstream query;
-		query << "^echof 1_# c_";
-		ser_.write(query.str());
-		ser_.flushOutput();
+		RCLCPP_ERROR(get_logger(), "Serial Port is not open");
+		return hardware_interface::CallbackReturn::FAILURE;
 	}
-	else
-	{
-		RCLCPP_ERROR(LOGGER, "Serial Port is not open");
-		return hardware_interface::CallbackReturn::ERROR;
-	}  
 
-  	return hardware_interface::CallbackReturn::SUCCESS;
+	RCLCPP_INFO(get_logger(), "Serial Port initialized");
+	// Disable echo and clear buffer history
+	ser_.write("^echof 1_# c_");
+	ser_.flush();
+
+	return hardware_interface::CallbackReturn::SUCCESS;
+}
+
+hardware_interface::CallbackReturn RoboteqHardwareInterface::on_cleanup(const rclcpp_lifecycle::State & /*previous_state*/)
+{
+	close_serial();
+	return hardware_interface::CallbackReturn::SUCCESS;
+}
+
+hardware_interface::CallbackReturn RoboteqHardwareInterface::on_shutdown(const rclcpp_lifecycle::State & /*previous_state*/)
+{
+	close_serial();
+	return hardware_interface::CallbackReturn::SUCCESS;
+}
+
+hardware_interface::CallbackReturn RoboteqHardwareInterface::on_activate(const rclcpp_lifecycle::State & /*previous_state*/)
+{
+	for (size_t i = 0; i < kChannels; ++i)
+	{
+		std::ignore = set_command(position_command_handles_[i], kNaN, true);
+		std::ignore = set_command(velocity_command_handles_[i], kNaN, true);
+		last_position_commands_[i] = kNaN;
+	}
+	position_controller_running_ = false;
+	velocity_controller_running_ = false;
+
+	return hardware_interface::CallbackReturn::SUCCESS;
 }
 
 hardware_interface::CallbackReturn RoboteqHardwareInterface::on_deactivate(const rclcpp_lifecycle::State& /*previous_state*/)
 {
+	position_controller_running_ = false;
+	velocity_controller_running_ = false;
+
+	// Stop both motors but keep the communication open so that states can still be read
 	if (ser_.isOpen())
 	{
-		ser_.close();
-	} 
-
-  	return hardware_interface::CallbackReturn::SUCCESS;
-}
-
-/*
-hardware_interface::CallbackReturn RoboteqHardwareInterface::on_error(const rclcpp_lifecycle::State& previous_state)
-{
-	if (previous_state.label() == "inactive" || previous_state.label() == "active")
-	{
-		if(!ser_.isOpen())
+		try
 		{
-			uint attempts = 0;
-			do
-			{
-				RCLCPP_ERROR(LOGGER, "Unable to open serial port. Trying to connect in 5 seconds.");
-				rclcpp::sleep_for(std::chrono::seconds(5));
-				try
-				{
-					ser_.setPort(params_.serial.port);
-					ser_.setBaudrate(params_.serial.baud);
-					serial::Timeout to = serial::Timeout::simpleTimeout(10);
-					ser_.setTimeout(to);
-					ser_.open();
-				}
-				catch (serial::IOException &e)
-				{
-					continue;
-				}
-			}
-			while(!ser_.isOpen() && attempts++ < MAX_RECONNECT_ATTEMPTS);
-
-			if(ser_.isOpen())
-			{
-				RCLCPP_INFO(LOGGER, "Connection recovered");
-				// Close because it will open again in the on_activate transition
-				ser_.close();
-				return hardware_interface::CallbackReturn::SUCCESS;
-			}
-			else
-			{
-				RCLCPP_FATAL(LOGGER, "Could not establish connection.");
-			}
+			ser_.write("!MS 1\r!MS 2\r");
+			ser_.flush();
+		}
+		catch (const std::exception & exc)
+		{
+			RCLCPP_ERROR(get_logger(), "Failed to stop motors: %s", exc.what());
+			return hardware_interface::CallbackReturn::ERROR;
 		}
 	}
 
-  	return hardware_interface::CallbackReturn::FAILURE;
-}
-*/
-
-std::vector<hardware_interface::StateInterface> RoboteqHardwareInterface::export_state_interfaces()
-{
-	std::vector<hardware_interface::StateInterface> state_interfaces;
-	for (const auto & joint : info_.joints)
-	{
-		const int index = std::stoi(joint.parameters.at("channel")) - 1;
-		state_interfaces.emplace_back(hardware_interface::StateInterface(joint.name, hardware_interface::HW_IF_POSITION, &joint_positions_[index]));
-		state_interfaces.emplace_back(hardware_interface::StateInterface(joint.name, hardware_interface::HW_IF_VELOCITY, &joint_velocities_[index]));
-	}
-
-	for (auto& map_item : params_.queries.queries_list_map)
-	{
-		for (int i = 0; i < map_item.second.size; ++i)
-		{
-			state_interfaces.emplace_back(hardware_interface::StateInterface("gpio", map_item.second.name + "_" + std::to_string(i), &map_item.second.values[i]));	
-		}
-	}
-	return state_interfaces;
-}
-
-std::vector<hardware_interface::CommandInterface> RoboteqHardwareInterface::export_command_interfaces()
-{
-	std::vector<hardware_interface::CommandInterface> command_interfaces;
-	for (const auto & joint : info_.joints)
-	{
-		const int index = std::stoi(joint.parameters.at("channel")) - 1;
-		command_interfaces.emplace_back(hardware_interface::CommandInterface(joint.name, hardware_interface::HW_IF_POSITION, &position_commands_[index]));
-		command_interfaces.emplace_back(hardware_interface::CommandInterface(joint.name, hardware_interface::HW_IF_VELOCITY, &velocity_commands_[index]));
-	}
-	return command_interfaces;
+	return hardware_interface::CallbackReturn::SUCCESS;
 }
 
 hardware_interface::return_type RoboteqHardwareInterface::read(const rclcpp::Time & /*time*/, const rclcpp::Duration & /*period*/)
 {
-	if(!ser_.isOpen())
+	if (!ser_.isOpen())
 	{
-		RCLCPP_ERROR(LOGGER, "Serial Port is not open");
-		return hardware_interface::return_type::ERROR;	
+		RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), kThrottleMs, "Serial Port is not open");
+		return hardware_interface::return_type::ERROR;
 	}
 
-	// Request data from roboteq
-	ser_.write(serial_query_.str());
-	ser_.flushOutput();
-
-	std::vector<std::string> queries_response_list;
-
-	// Read data from serial
-	size_t max_line_size{65536};
-	std::string eol{"\r"};
-	std::string response;
-	std::string del;
-	size_t del_pos;
-	std::string key;
-	std::string data;
-
-	int data_start;
-	int data_end;
-	int i;
-
-	if(!ser_.waitReadable())
+	try
 	{
-		RCLCPP_WARN(LOGGER, "Serial timed out waiting for response");
-		return hardware_interface::return_type::OK;
-	}
+		// Request data from roboteq
+		ser_.write(serial_query_);
+		ser_.flush();
 
-	while (ser_.available())
-	{
-		response = ser_.readline(max_line_size, eol);
-
-		del = "=";
-		del_pos = response.find(del);
-		if(del_pos == std::string::npos)
-		{	
-			continue;
-		}
-
-		key = response.substr(0, del_pos);
-		data = response.substr(del_pos + del.size());
-
-		if (std::find(params_.queries_list.begin(), params_.queries_list.end(), key) == params_.queries_list.end()) 
+		for (auto& [query, state] : queries_)
 		{
-			RCLCPP_WARN(LOGGER, "'%s' is not part of the queries list", key.c_str());
-			continue;
+			state.received = false;
+		}
+		queries_response_list_.clear();
+
+		if (!ser_.waitReadable())
+		{
+			RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), kThrottleMs, "Serial timed out waiting for response");
+			return hardware_interface::return_type::OK;
 		}
 
-		queries_response_list.push_back(key);
+		while (ser_.available())
+		{
+			const std::string response = ser_.readline(kMaxLineSize, kEol);
+			const std::string_view line(response);
 
-		del = ":";
-		data_end = -1*del.size();
-		i = 0;
-		do {
-			data_start = data_end + del.size();
-			data_end = data.find(del, data_start);
-			params_.queries.queries_list_map.at(key).values[i] = std::stod(data.substr(data_start, data_end - data_start));
-			i = i + 1;
-		} while (data_end != -1 and i < params_.queries.queries_list_map.at(key).size);
+			const size_t del_pos = line.find('=');
+			if (del_pos == std::string_view::npos)
+			{
+				continue;
+			}
+
+			// Query codes are short, so constructing the key does not allocate
+			const auto query_it = queries_.find(std::string(line.substr(0, del_pos)));
+			if (query_it == queries_.end())
+			{
+				RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), kThrottleMs, "'%.*s' is not part of the queries list",
+					static_cast<int>(del_pos), line.data());
+				continue;
+			}
+
+			QueryState& state = query_it->second;
+			queries_response_list_.push_back(query_it->first);
+
+			// Parse "v1:v2:...", the line still contains the trailing end of line character
+			std::string_view data = line.substr(del_pos + 1);
+			size_t i = 0;
+			for (; i < state.values.size(); ++i)
+			{
+				const size_t sep = data.find(':');
+				const std::string_view token = data.substr(0, sep);
+				double value;
+				const auto [ptr, ec] = std::from_chars(token.data(), token.data() + token.size(), value);
+				if (ec != std::errc())
+				{
+					break;
+				}
+				state.values[i] = value;
+				if (sep == std::string_view::npos)
+				{
+					++i;
+					break;
+				}
+				data.remove_prefix(sep + 1);
+			}
+
+			if (i != state.values.size())
+			{
+				RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), kThrottleMs, "Malformed response: '%s'", response.c_str());
+				continue;
+			}
+			state.received = true;
+
+			// The relative counts are reset on every query, accumulate every response so that none are lost or counted twice
+			if (&state == position_query_)
+			{
+				for (size_t ch = 0; ch < kChannels; ++ch)
+				{
+					actuator_position_counts_[ch] += std::llround(state.values[ch]);
+				}
+			}
+		}
+	}
+	catch (const std::exception & exc)
+	{
+		RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), kThrottleMs, "Serial communication failed: %s", exc.what());
+		return hardware_interface::return_type::ERROR;
 	}
 
-	if (queries_response_list != params_.queries_list)
+	if (queries_response_list_ != params_.queries_list)
 	{
 		std::string expected;
 		std::string actual;
-		for(const auto &s : params_.queries_list) expected = expected + s + " ";
-		for(const auto &s : queries_response_list) actual = actual + s + " ";
-		RCLCPP_WARN(LOGGER, "The queries response did not match the expected one");
-		RCLCPP_WARN(LOGGER, "Expected: %s", expected.c_str());
-		RCLCPP_WARN(LOGGER, "Got: %s", actual.c_str());
+		for (const auto &s : params_.queries_list) expected += s + " ";
+		for (const auto &s : queries_response_list_) actual += s + " ";
+		RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), kThrottleMs, "The queries response did not match the expected one. Expected: %s Got: %s",
+			expected.c_str(), actual.c_str());
 	}
 
-	// actuator: state -> transmission
-	for (size_t i = 0; i != actuators_position_transmission_passthrough_.size(); ++i)
+	for (auto& [query, state] : queries_)
 	{
-		actuators_position_transmission_passthrough_[i] = (params_.queries.queries_list_map.at(position_query_).values[i] / params_.encoder.cpr) * (2*M_PI); // Convert from encoder counts to rad
+		if (!state.received)
+		{
+			continue;
+		}
+		for (size_t i = 0; i < state.values.size(); ++i)
+		{
+			std::ignore = set_state(state.handles[i], state.values[i], false);
+		}
 	}
 
-	for (size_t i = 0; i != actuators_velocity_transmission_passthrough_.size(); ++i)
+	for (size_t ch = 0; ch < kChannels; ++ch)
 	{
-		actuators_velocity_transmission_passthrough_[i] = (params_.queries.queries_list_map.at(velocity_query_).values[i] * (2*M_PI)) / 60; // Conversion from RPM to 1/s (rad/s)
-	}
+		// actuator: state -> transmission
+		actuators_position_transmission_passthrough_[ch] = counts_to_rad(static_cast<double>(actuator_position_counts_[ch]));
+		actuators_velocity_transmission_passthrough_[ch] = (velocity_query_->values[ch] * (2 * M_PI)) / 60; // Conversion from RPM to rad/s
 
-	// transmission: actuator -> joint
-	std::for_each(position_transmissions_.begin(), position_transmissions_.end(), [](auto & transmission) { transmission->actuator_to_joint(); });
-	std::for_each(velocity_transmissions_.begin(), velocity_transmissions_.end(), [](auto & transmission) { transmission->actuator_to_joint(); });
+		// transmission: actuator -> joint
+		transmissions_[ch]->actuator_to_joint();
 
-	// joint: transmission -> state
-	for (size_t i = 0; i != joints_position_transmission_passthrough_.size(); ++i)
-	{
-		joint_positions_[i] += joints_position_transmission_passthrough_[i] ; // accumulating relative encoder changes to produce absolute position state interface
-	}
-	for (size_t i = 0; i != joints_velocity_transmission_passthrough_.size(); ++i)
-	{
-		joint_velocities_[i] = joints_velocity_transmission_passthrough_[i] ;
+		// joint: transmission -> state
+		std::ignore = set_state(position_state_handles_[ch], joints_position_transmission_passthrough_[ch], false);
+		std::ignore = set_state(velocity_state_handles_[ch], joints_velocity_transmission_passthrough_[ch], false);
 	}
 
 	return hardware_interface::return_type::OK;
@@ -502,46 +570,71 @@ hardware_interface::return_type RoboteqHardwareInterface::read(const rclcpp::Tim
 
 hardware_interface::return_type RoboteqHardwareInterface::write(const rclcpp::Time & /*time*/, const rclcpp::Duration & /*period*/)
 {
-	if(!ser_.isOpen())
+	if (!ser_.isOpen())
 	{
-		return hardware_interface::return_type::ERROR;	
+		RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), kThrottleMs, "Serial Port is not open");
+		return hardware_interface::return_type::ERROR;
 	}
 
-	std::stringstream channel_one_cmd;
-	std::stringstream channel_two_cmd;
-
-	if (position_controller_running_) 
+	if (!position_controller_running_ && !velocity_controller_running_)
 	{
-		// joint: command -> transmission
-		for (size_t i = 0; i != joints_position_transmission_passthrough_.size(); ++i)
-		{
-			joints_position_transmission_passthrough_[i] = position_commands_[i];
-		}
+		return hardware_interface::return_type::OK;
+	}
 
-		// transmission: joint -> actuator
-		std::for_each(position_transmissions_.begin(), position_transmissions_.end(), [](auto & transmission) { transmission->joint_to_actuator(); });
+	serial_command_.clear();
 
-		channel_one_cmd << "!PR 1 " << static_cast<int>(actuators_position_transmission_passthrough_[0]) << "\r";
-		channel_two_cmd << "!PR 2 " << static_cast<int>(actuators_position_transmission_passthrough_[1]) << "\r";
-    } 
-	else if (velocity_controller_running_) 
+	for (size_t ch = 0; ch < kChannels; ++ch)
 	{
-		// joint: command -> transmission
-		for (size_t i = 0; i != joints_velocity_transmission_passthrough_.size(); ++i)
+		const std::string channel = std::to_string(ch + 1);
+		double command;
+
+		if (position_controller_running_)
 		{
-			joints_velocity_transmission_passthrough_[i] = (velocity_commands_[i] / (2*M_PI)) * 60; // Conversion to RPM from 1/s (rad/s)
+			if (!get_command(position_command_handles_[ch], command, false) || std::isnan(command) || command == last_position_commands_[ch])
+			{
+				continue;
+			}
+
+			// joint: command -> transmission -> actuator
+			joints_position_transmission_passthrough_[ch] = command;
+			transmissions_[ch]->joint_to_actuator();
+
+			// !PR is a relative move, so send the distance between the target and the current position
+			const int64_t target_counts = std::llround(rad_to_counts(actuators_position_transmission_passthrough_[ch]));
+			serial_command_ += "!PR " + channel + " " + std::to_string(target_counts - actuator_position_counts_[ch]) + "\r";
+			last_position_commands_[ch] = command;
 		}
+		else
+		{
+			if (!get_command(velocity_command_handles_[ch], command, false) || std::isnan(command))
+			{
+				continue;
+			}
 
-		// transmission: joint -> actuator
-		std::for_each(velocity_transmissions_.begin(), velocity_transmissions_.end(), [](auto & transmission) { transmission->joint_to_actuator(); });
+			// joint: command -> transmission -> actuator
+			joints_velocity_transmission_passthrough_[ch] = command;
+			transmissions_[ch]->joint_to_actuator();
 
-		channel_one_cmd << "!S 1 " << static_cast<int>(actuators_velocity_transmission_passthrough_[0]) << "\r";
-		channel_two_cmd << "!S 2 " << static_cast<int>(actuators_velocity_transmission_passthrough_[1]) << "\r";		
-	}	
+			const int64_t rpm = std::llround((actuators_velocity_transmission_passthrough_[ch] / (2 * M_PI)) * 60); // Conversion to RPM from rad/s
+			serial_command_ += "!S " + channel + " " + std::to_string(rpm) + "\r";
+		}
+	}
 
-	ser_.write(channel_one_cmd.str());
-	ser_.write(channel_two_cmd.str());
-	ser_.flush();
+	if (serial_command_.empty())
+	{
+		return hardware_interface::return_type::OK;
+	}
+
+	try
+	{
+		ser_.write(serial_command_);
+		ser_.flush();
+	}
+	catch (const std::exception & exc)
+	{
+		RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), kThrottleMs, "Serial communication failed: %s", exc.what());
+		return hardware_interface::return_type::ERROR;
+	}
 
 	return hardware_interface::return_type::OK;
 }
@@ -555,56 +648,56 @@ hardware_interface::return_type RoboteqHardwareInterface::prepare_command_mode_s
 
 	// Starting interfaces
 	// add start interface per joint in tmp var for later check
-	for (const auto& key : start_interfaces) 
+	for (const auto& key : start_interfaces)
 	{
-		for (auto i = 0u; i < info_.joints.size(); i++) 
+		for (const auto& joint_name : joint_names_)
 		{
-			if (key == info_.joints[i].name + "/" + hardware_interface::HW_IF_POSITION) 
+			if (key == joint_name + "/" + hardware_interface::HW_IF_POSITION)
 			{
 				start_modes_.push_back(hardware_interface::HW_IF_POSITION);
 			}
-			if (key == info_.joints[i].name + "/" + hardware_interface::HW_IF_VELOCITY) 
+			if (key == joint_name + "/" + hardware_interface::HW_IF_VELOCITY)
 			{
 				start_modes_.push_back(hardware_interface::HW_IF_VELOCITY);
 			}
 		}
 	}
 	// set new mode to all interfaces at the same time
-	if (start_modes_.size() != 0 && start_modes_.size() != 2) 
+	if (start_modes_.size() != 0 && start_modes_.size() != kChannels)
 	{
 		ret_val = hardware_interface::return_type::ERROR;
 	}
 
 	// all start interfaces must be the same - can't mix position and velocity control
-	if (start_modes_.size() != 0 && !std::equal(start_modes_.begin() + 1, start_modes_.end(), start_modes_.begin())) 
+	if (start_modes_.size() != 0 && !std::equal(start_modes_.begin() + 1, start_modes_.end(), start_modes_.begin()))
 	{
 		ret_val = hardware_interface::return_type::ERROR;
 	}
 
 	// Stopping interfaces
 	// add stop interface per joint in tmp var for later check
-	for (const auto& key : stop_interfaces) 
+	for (const auto& key : stop_interfaces)
 	{
-		for (auto i = 0u; i < info_.joints.size(); i++) 
+		for (const auto& joint_name : joint_names_)
 		{
-			if (key == info_.joints[i].name + "/" + hardware_interface::HW_IF_POSITION) 
+			if (key == joint_name + "/" + hardware_interface::HW_IF_POSITION)
 			{
 				stop_modes_.push_back(hardware_interface::HW_IF_POSITION);
 			}
-			if (key == info_.joints[i].name + "/" + hardware_interface::HW_IF_VELOCITY) 
+			if (key == joint_name + "/" + hardware_interface::HW_IF_VELOCITY)
 			{
 				stop_modes_.push_back(hardware_interface::HW_IF_VELOCITY);
 			}
 		}
 	}
 	// stop all interfaces at the same time
-	if (stop_modes_.size() != 0 && stop_modes_.size() != 2) 
+	if (stop_modes_.size() != 0 && stop_modes_.size() != kChannels)
 	{
 		ret_val = hardware_interface::return_type::ERROR;
 	}
 
 	// all stop interfaces must be the same - can't mix position and velocity control
-	if (stop_modes_.size() != 0 && !std::equal(stop_modes_.begin() + 1, stop_modes_.end(), stop_modes_.begin())) 
+	if (stop_modes_.size() != 0 && !std::equal(stop_modes_.begin() + 1, stop_modes_.end(), stop_modes_.begin()))
 	{
 		ret_val = hardware_interface::return_type::ERROR;
 	}
@@ -614,36 +707,66 @@ hardware_interface::return_type RoboteqHardwareInterface::prepare_command_mode_s
 
 hardware_interface::return_type RoboteqHardwareInterface::perform_command_mode_switch(const std::vector<std::string>& /*start_interfaces*/, const std::vector<std::string>& /*stop_interfaces*/)
 {
-	hardware_interface::return_type ret_val = hardware_interface::return_type::OK;
-
-	if (stop_modes_.size() != 0 && std::find(stop_modes_.begin(), stop_modes_.end(), hardware_interface::HW_IF_POSITION) != stop_modes_.end()) 
+	if (!stop_modes_.empty() && stop_modes_.front() == hardware_interface::HW_IF_POSITION)
 	{
 		position_controller_running_ = false;
-	} 
-	else if (stop_modes_.size() != 0 && std::find(stop_modes_.begin(), stop_modes_.end(), hardware_interface::HW_IF_VELOCITY) != stop_modes_.end()) 
+	}
+	else if (!stop_modes_.empty() && stop_modes_.front() == hardware_interface::HW_IF_VELOCITY)
 	{
 		velocity_controller_running_ = false;
-		for (auto& command : velocity_commands_) command = 0.0;
+		for (const auto& handle : velocity_command_handles_)
+		{
+			std::ignore = set_command(handle, 0.0, false);
+		}
 	}
 
-	if (start_modes_.size() != 0 && std::find(start_modes_.begin(), start_modes_.end(), hardware_interface::HW_IF_POSITION) != start_modes_.end()) 
+	if (!start_modes_.empty() && start_modes_.front() == hardware_interface::HW_IF_POSITION)
 	{
 		velocity_controller_running_ = false;
+		std::fill(last_position_commands_.begin(), last_position_commands_.end(), kNaN);
 		position_controller_running_ = true;
-
-	} 
-	else if (start_modes_.size() != 0 && std::find(start_modes_.begin(), start_modes_.end(), hardware_interface::HW_IF_VELOCITY) != start_modes_.end()) 
+	}
+	else if (!start_modes_.empty() && start_modes_.front() == hardware_interface::HW_IF_VELOCITY)
 	{
 		position_controller_running_ = false;
-		for (auto& command : velocity_commands_) command = 0.0;
+		for (const auto& handle : velocity_command_handles_)
+		{
+			std::ignore = set_command(handle, 0.0, false);
+		}
 		velocity_controller_running_ = true;
 	}
 
 	start_modes_.clear();
 	stop_modes_.clear();
 
-	return ret_val;
+	return hardware_interface::return_type::OK;
 }
+
+void RoboteqHardwareInterface::close_serial()
+{
+	try
+	{
+		if (ser_.isOpen())
+		{
+			ser_.close();
+		}
+	}
+	catch (const std::exception & exc)
+	{
+		RCLCPP_ERROR(get_logger(), "Failed to close serial port: %s", exc.what());
+	}
+}
+
+double RoboteqHardwareInterface::counts_to_rad(double counts) const
+{
+	return (counts / params_.encoder.cpr) * (2 * M_PI);
+}
+
+double RoboteqHardwareInterface::rad_to_counts(double rad) const
+{
+	return (rad / (2 * M_PI)) * params_.encoder.cpr;
+}
+
 } // roboteq_motor_controller_driver namespace
 
 #include "pluginlib/class_list_macros.hpp"

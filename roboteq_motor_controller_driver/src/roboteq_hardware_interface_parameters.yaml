@@ -49,10 +49,3 @@ roboteq_motor_controller_driver:
           gt<>: [0],
         }
       }
-      values: {
-        type: double_array,
-        read_only: true,
-        default_value: [],
-      }
-
- 

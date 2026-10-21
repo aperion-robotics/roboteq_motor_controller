@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -16,10 +17,10 @@
 // ROS
 #include <rclcpp/rclcpp.hpp>
 #include "rclcpp/macros.hpp"
-#include <serial/serial.h>
 #include "rclcpp_lifecycle/node_interfaces/lifecycle_node_interface.hpp"
 #include "rclcpp_lifecycle/state.hpp"
 #include "roboteq_motor_controller_driver/roboteq_hardware_interface_parameters.hpp"
+#include "roboteq_motor_controller_driver/serial_port.hpp"
 
 namespace roboteq_motor_controller_driver
 {
@@ -58,7 +59,8 @@ private:
 		bool received{false};
 	};
 
-	void close_serial();
+	// Parse a single "<query>=<v1>:<v2>..." response into its query state
+	void handle_response(std::string_view line);
 	double counts_to_rad(double counts) const;
 	double rad_to_counts(double rad) const;
 
@@ -88,9 +90,11 @@ private:
 	std::string serial_query_;
 	std::string serial_command_;
 	std::vector<std::string> queries_response_list_;
+	size_t queries_received_{0};
 
 	// Serial
-	serial::Serial ser_;
+	SerialPort serial_port_;
+	std::string serial_error_;
 
 	// resources switching aux vars
 	std::vector<std::string> stop_modes_;

@@ -6,7 +6,6 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 set(THIS_PACKAGE_INCLUDE_DEPENDS
-  serial
   rclcpp
   pluginlib
   realtime_tools
@@ -32,6 +31,7 @@ generate_parameter_library(
 # hardware interface plugin
 add_library(roboteq_motor_controller_driver_plugin SHARED
   src/roboteq_hardware_interface.cpp
+  src/serial_port.cpp
 )
 target_include_directories(roboteq_motor_controller_driver_plugin PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -40,7 +40,6 @@ target_include_directories(roboteq_motor_controller_driver_plugin PUBLIC
 target_link_libraries(roboteq_motor_controller_driver_plugin
   PUBLIC
     roboteq_hardware_interface_parameters
-    serial::serial
     rclcpp::rclcpp
     rclcpp_lifecycle::rclcpp_lifecycle
     hardware_interface::hardware_interface

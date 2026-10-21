@@ -8,6 +8,15 @@ roboteq_motor_controller_driver:
       type: int,
       read_only: true,
     }
+    timeout_ms: {
+      type: int,
+      default_value: 10,
+      read_only: true,
+      description: "Time to wait for the responses to the queries in each read cycle",
+      validation: {
+        gt<>: [0],
+      }
+    }
 
   encoder:
     cpr: {

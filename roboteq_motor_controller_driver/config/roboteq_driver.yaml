@@ -8,9 +8,6 @@
     encoder:
       cpr: 10000 # with quadrature
 
-    effort:
-      amps_limit: 60.0 # TODO: set to the Amps Limit configured in the controller (A)
-
     # operating_modes: # ^MMOD sent on controller switch. Defaults: position 3, velocity 1, effort 5
     
     queries_list: ["CR", "S", "A", "FS", "FF", "FM"]

@@ -1,6 +1,8 @@
 #ifndef ROBOTEQ_HARDWARE_INTERFACE_HPP_
 #define ROBOTEQ_HARDWARE_INTERFACE_HPP_
 
+#include <array>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -52,6 +54,8 @@ public:
 	hardware_interface::return_type perform_command_mode_switch(const std::vector<std::string>& start_interfaces, const std::vector<std::string>& stop_interfaces) override;
 
 private:
+	static constexpr size_t kChannels = 2;
+
 	enum class ControlMode
 	{
 		NONE,
@@ -74,6 +78,10 @@ private:
 	// Send a single raw command and wait for its reply. Runs in the executor thread, never in the control loop
 	void handle_send_command(const std::shared_ptr<roboteq_motor_controller_msgs::srv::SendCommand::Request> request,
 		std::shared_ptr<roboteq_motor_controller_msgs::srv::SendCommand::Response> response);
+	// Send a single command and wait for its reply. The caller must hold serial_mutex_
+	bool transact(const std::string& command, std::string& reply, std::string& error);
+	// Read the Amps Limit of both channels (~ALIM) into amps_limits_. The caller must hold serial_mutex_
+	bool read_amps_limits(std::string& error);
 	double counts_to_rad(double counts) const;
 	double rad_to_counts(double rad) const;
 
@@ -92,6 +100,8 @@ private:
 	std::vector<double> actuators_effort_transmission_passthrough_;
 	std::vector<int64_t> actuator_position_counts_;
 	std::vector<double> last_position_commands_;
+	// Amps Limit read from the controller [A], written by non real time threads and read by write()
+	std::array<std::atomic<double>, kChannels> amps_limits_{};
 
 	std::vector<hardware_interface::StateInterface::SharedPtr> position_state_handles_;
 	std::vector<hardware_interface::StateInterface::SharedPtr> velocity_state_handles_;

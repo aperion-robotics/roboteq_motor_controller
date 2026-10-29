@@ -18,7 +18,6 @@ namespace roboteq_motor_controller_driver
 
 constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
 constexpr int kThrottleMs = 1000;
-constexpr size_t kChannels = 2;
 // Silence required before sending a service command, so that late replies to the control loop are not mistaken for its reply
 constexpr int kDrainQuietMs = 5;
 
@@ -427,6 +426,14 @@ hardware_interface::CallbackReturn RoboteqHardwareInterface::on_configure(const 
 		return hardware_interface::CallbackReturn::FAILURE;
 	}
 
+	// The effort commands are scaled with the Amps Limit configured in the controller
+	if (!read_amps_limits(serial_error_))
+	{
+		RCLCPP_ERROR(get_logger(), "%s", serial_error_.c_str());
+		serial_port_.close();
+		return hardware_interface::CallbackReturn::FAILURE;
+	}
+
 	return hardware_interface::CallbackReturn::SUCCESS;
 }
 
@@ -720,7 +727,7 @@ hardware_interface::return_type RoboteqHardwareInterface::write(const rclcpp::Ti
 
 				// !G in torque mode is the per-mille of the Amps Limit
 				const int64_t torque = std::clamp<int64_t>(
-					std::llround((actuators_effort_transmission_passthrough_[ch] / params_.effort.amps_limit) * 1000), -1000, 1000);
+					std::llround((actuators_effort_transmission_passthrough_[ch] / amps_limits_[ch].load(std::memory_order_relaxed)) * 1000), -1000, 1000);
 				serial_command_ += "!G " + channel + " " + std::to_string(torque) + "\r";
 				break;
 			}
@@ -891,6 +898,36 @@ void RoboteqHardwareInterface::handle_send_command(const std::shared_ptr<roboteq
 		return;
 	}
 
+	std::lock_guard<std::mutex> lock(serial_mutex_);
+
+	std::string error;
+	response->success = transact(command, response->response, error);
+	if (!response->success)
+	{
+		response->message = error;
+		RCLCPP_WARN(get_logger(), "Command '%s' failed: %s", command.c_str(), error.c_str());
+		return;
+	}
+	RCLCPP_INFO(get_logger(), "Command '%s' -> '%s'", command.c_str(), response->response.c_str());
+
+	// Keep the effort scaling in sync when the Amps Limit is changed at runtime
+	std::string upper_command = command;
+	std::transform(upper_command.begin(), upper_command.end(), upper_command.begin(), [](unsigned char c) { return std::toupper(c); });
+	if (upper_command.rfind("^ALIM", 0) == 0 && !read_amps_limits(error))
+	{
+		response->message = "Command succeeded but re-reading the Amps Limit failed: " + error;
+		RCLCPP_ERROR(get_logger(), "%s", response->message.c_str());
+	}
+}
+
+bool RoboteqHardwareInterface::transact(const std::string& command, std::string& reply, std::string& error)
+{
+	if (!serial_port_.is_open())
+	{
+		error = "Serial Port is not open";
+		return false;
+	}
+
 	// Queries and config reads reply with "<CODE>=...", everything else with "+" or "-"
 	std::string reply_prefix;
 	if (command.front() == '?' || command.front() == '~')
@@ -900,15 +937,6 @@ void RoboteqHardwareInterface::handle_send_command(const std::shared_ptr<roboteq
 		reply_prefix += '=';
 	}
 
-	std::lock_guard<std::mutex> lock(serial_mutex_);
-
-	if (!serial_port_.is_open())
-	{
-		response->message = "Serial Port is not open";
-		return;
-	}
-
-	std::string error;
 	std::string_view line;
 	SerialPort::ReadResult result;
 
@@ -920,9 +948,7 @@ void RoboteqHardwareInterface::handle_send_command(const std::shared_ptr<roboteq
 
 	if (result == SerialPort::ReadResult::ERROR || !serial_port_.write(command + "\r", error))
 	{
-		response->message = error;
-		RCLCPP_ERROR(get_logger(), "Command '%s' failed: %s", command.c_str(), error.c_str());
-		return;
+		return false;
 	}
 
 	const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(params_.serial.command_timeout_ms);
@@ -931,16 +957,13 @@ void RoboteqHardwareInterface::handle_send_command(const std::shared_ptr<roboteq
 		result = serial_port_.read_line(line, deadline, error);
 		if (result == SerialPort::ReadResult::ERROR)
 		{
-			response->message = error;
-			RCLCPP_ERROR(get_logger(), "Command '%s' failed: %s", command.c_str(), error.c_str());
-			return;
+			return false;
 		}
 
 		if (result == SerialPort::ReadResult::TIMEOUT)
 		{
-			response->message = "Timed out waiting for reply";
-			RCLCPP_WARN(get_logger(), "Command '%s' timed out waiting for reply", command.c_str());
-			return;
+			error = "Timed out waiting for reply";
+			return false;
 		}
 
 		const bool is_reply = (line == "-") ||
@@ -950,15 +973,50 @@ void RoboteqHardwareInterface::handle_send_command(const std::shared_ptr<roboteq
 			continue;
 		}
 
-		response->response = std::string(line);
-		response->success = (line != "-");
-		if (!response->success)
+		reply = std::string(line);
+		if (line == "-")
 		{
-			response->message = "Command rejected by the controller";
+			error = "Command rejected by the controller";
+			return false;
 		}
-		RCLCPP_INFO(get_logger(), "Command '%s' -> '%s'", command.c_str(), response->response.c_str());
-		return;
+		return true;
 	}
+}
+
+bool RoboteqHardwareInterface::read_amps_limits(std::string& error)
+{
+	std::string reply;
+	if (!transact("~ALIM", reply, error))
+	{
+		error = "Unable to read the Amps Limit (~ALIM): " + error;
+		return false;
+	}
+
+	// Parse "ALIM=v1:v2", values are Amps * 10
+	std::array<double, kChannels> limits{};
+	std::string_view data = std::string_view(reply).substr(reply.find('=') + 1);
+	for (size_t ch = 0; ch < kChannels; ++ch)
+	{
+		const size_t sep = data.find(':');
+		const std::string_view token = data.substr(0, sep);
+		double value;
+		const auto [ptr, ec] = std::from_chars(token.data(), token.data() + token.size(), value);
+		if (ec != std::errc() || value <= 0.0 || (sep == std::string_view::npos && ch + 1 < kChannels))
+		{
+			error = "Malformed Amps Limit reply: '" + reply + "'";
+			return false;
+		}
+		limits[ch] = value / 10.0;
+		data.remove_prefix(sep == std::string_view::npos ? data.size() : sep + 1);
+	}
+
+	for (size_t ch = 0; ch < kChannels; ++ch)
+	{
+		amps_limits_[ch].store(limits[ch], std::memory_order_relaxed);
+	}
+	RCLCPP_INFO(get_logger(), "Amps limits: %.1f A, %.1f A", limits[0], limits[1]);
+
+	return true;
 }
 
 double RoboteqHardwareInterface::counts_to_rad(double counts) const

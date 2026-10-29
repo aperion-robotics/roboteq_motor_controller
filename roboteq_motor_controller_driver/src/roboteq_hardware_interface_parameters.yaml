@@ -36,16 +36,6 @@ roboteq_motor_controller_driver:
       }
     }
 
-  effort:
-    amps_limit: {
-      type: double,
-      read_only: true,
-      description: "Amps Limit configured in the controller. An effort command of amps_limit maps to !G 1000",
-      validation: {
-        gt<>: [0.0],
-      }
-    }
-
   operating_modes:
     position: {
       type: int,

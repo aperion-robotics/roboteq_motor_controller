@@ -11,18 +11,18 @@ def generate_launch_description():
     declared_arguments = [
         DeclareLaunchArgument(
             "description_package",
-            default_value="vojext_robot_description",
+            default_value="robot_description",
             description="Description package with robot URDF/XACRO files. Usually the argument \
         is not set, it enables use of a custom description.",
         ),
         DeclareLaunchArgument(
             "description_file",
-            default_value="vojext_robot.urdf.xacro",
+            default_value="robot.urdf.xacro",
             description="URDF/XACRO description file with the robot.",
         ),
         DeclareLaunchArgument(
             "prefix",
-            default_value="vojext",
+            default_value="",
             description="Prefix for link and joint names, for multi-robot setups",
         ),
         DeclareLaunchArgument(

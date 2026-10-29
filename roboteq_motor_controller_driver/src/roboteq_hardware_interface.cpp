@@ -43,9 +43,9 @@ hardware_interface::CallbackReturn RoboteqHardwareInterface::on_init(const hardw
 
 	for (const hardware_interface::ComponentInfo& joint : info_.joints)
 	{
-		if (joint.command_interfaces.size() != 2)
+		if (joint.command_interfaces.size() != 3)
 		{
-			RCLCPP_FATAL(get_logger(), "Joint '%s' has %zu command interfaces. 2 expected.", joint.name.c_str(), joint.command_interfaces.size());
+			RCLCPP_FATAL(get_logger(), "Joint '%s' has %zu command interfaces. 3 expected.", joint.name.c_str(), joint.command_interfaces.size());
 			return hardware_interface::CallbackReturn::ERROR;
 		}
 
@@ -63,9 +63,16 @@ hardware_interface::CallbackReturn RoboteqHardwareInterface::on_init(const hardw
 			return hardware_interface::CallbackReturn::ERROR;
 		}
 
-		if (joint.state_interfaces.size() != 2)
+		if (joint.command_interfaces[2].name != hardware_interface::HW_IF_EFFORT)
 		{
-			RCLCPP_FATAL(get_logger(), "Joint '%s' has %zu state interfaces. 2 expected.", joint.name.c_str(), joint.state_interfaces.size());
+			RCLCPP_FATAL(get_logger(), "Joint '%s' has %s command interface as third command interface. '%s' expected.",
+						joint.name.c_str(), joint.command_interfaces[2].name.c_str(), hardware_interface::HW_IF_EFFORT);
+			return hardware_interface::CallbackReturn::ERROR;
+		}
+
+		if (joint.state_interfaces.size() != 3)
+		{
+			RCLCPP_FATAL(get_logger(), "Joint '%s' has %zu state interfaces. 3 expected.", joint.name.c_str(), joint.state_interfaces.size());
 			return hardware_interface::CallbackReturn::ERROR;
 		}
 
@@ -80,6 +87,13 @@ hardware_interface::CallbackReturn RoboteqHardwareInterface::on_init(const hardw
 		{
 			RCLCPP_FATAL(get_logger(), "Joint '%s' has %s state interface as second state interface. '%s' expected.", joint.name.c_str(),
 						joint.state_interfaces[1].name.c_str(), hardware_interface::HW_IF_VELOCITY);
+			return hardware_interface::CallbackReturn::ERROR;
+		}
+
+		if (joint.state_interfaces[2].name != hardware_interface::HW_IF_EFFORT)
+		{
+			RCLCPP_FATAL(get_logger(), "Joint '%s' has %s state interface as third state interface. '%s' expected.", joint.name.c_str(),
+						joint.state_interfaces[2].name.c_str(), hardware_interface::HW_IF_EFFORT);
 			return hardware_interface::CallbackReturn::ERROR;
 		}
 
@@ -117,6 +131,8 @@ hardware_interface::CallbackReturn RoboteqHardwareInterface::on_init(const hardw
 	joints_velocity_transmission_passthrough_.assign(kChannels, kNaN);
 	actuators_position_transmission_passthrough_.assign(kChannels, kNaN);
 	actuators_velocity_transmission_passthrough_.assign(kChannels, kNaN);
+	joints_effort_transmission_passthrough_.assign(kChannels, kNaN);
+	actuators_effort_transmission_passthrough_.assign(kChannels, kNaN);
 	actuator_position_counts_.assign(kChannels, 0);
 	last_position_commands_.assign(kChannels, kNaN);
 
@@ -173,14 +189,16 @@ hardware_interface::CallbackReturn RoboteqHardwareInterface::on_init(const hardw
 		const std::string& joint_name = transmission_info.joints[0].name;
 		const std::string& actuator_name = transmission_info.actuators[0].name;
 
-		// A single transmission handles both the position and the velocity interfaces of the joint
+		// A single transmission handles the position, velocity and effort interfaces of the joint
 		const std::vector<transmission_interface::JointHandle> joint_handles{
 			transmission_interface::JointHandle(joint_name, hardware_interface::HW_IF_POSITION, &joints_position_transmission_passthrough_[index]),
-			transmission_interface::JointHandle(joint_name, hardware_interface::HW_IF_VELOCITY, &joints_velocity_transmission_passthrough_[index])};
+			transmission_interface::JointHandle(joint_name, hardware_interface::HW_IF_VELOCITY, &joints_velocity_transmission_passthrough_[index]),
+			transmission_interface::JointHandle(joint_name, hardware_interface::HW_IF_EFFORT, &joints_effort_transmission_passthrough_[index])};
 
 		const std::vector<transmission_interface::ActuatorHandle> actuator_handles{
 			transmission_interface::ActuatorHandle(actuator_name, hardware_interface::HW_IF_POSITION, &actuators_position_transmission_passthrough_[index]),
-			transmission_interface::ActuatorHandle(actuator_name, hardware_interface::HW_IF_VELOCITY, &actuators_velocity_transmission_passthrough_[index])};
+			transmission_interface::ActuatorHandle(actuator_name, hardware_interface::HW_IF_VELOCITY, &actuators_velocity_transmission_passthrough_[index]),
+			transmission_interface::ActuatorHandle(actuator_name, hardware_interface::HW_IF_EFFORT, &actuators_effort_transmission_passthrough_[index])};
 
 		try
 		{
@@ -258,6 +276,17 @@ hardware_interface::CallbackReturn RoboteqHardwareInterface::on_init(const hardw
 		velocity_query = "BS";
 	}
 
+	const std::string effort_query = "A";
+	if (!contains_query(effort_query))
+	{
+		RCLCPP_WARN(get_logger(), "No motor amps query found. Defaulting to A");
+		params_.queries_list.push_back(effort_query);
+		Params::Queries::MapQueriesList a_struct;
+		a_struct.name = "motor_amps";
+		a_struct.size = kChannels;
+		params_.queries.queries_list_map.insert({effort_query, a_struct});
+	}
+
 	// Check for duplicate names and allocate the query buffers
 	std::unordered_set<std::string> name_set;
 	queries_.clear();
@@ -278,10 +307,12 @@ hardware_interface::CallbackReturn RoboteqHardwareInterface::on_init(const hardw
 	// Pointers to unordered_map elements remain valid as long as the element is not erased
 	position_query_ = &queries_.at(position_query);
 	velocity_query_ = &queries_.at(velocity_query);
+	effort_query_ = &queries_.at(effort_query);
 
-	if (position_query_->values.size() < kChannels || velocity_query_->values.size() < kChannels)
+	if (position_query_->values.size() < kChannels || velocity_query_->values.size() < kChannels || effort_query_->values.size() < kChannels)
 	{
-		RCLCPP_FATAL(get_logger(), "Queries '%s' and '%s' must have a size of at least %zu.", position_query.c_str(), velocity_query.c_str(), kChannels);
+		RCLCPP_FATAL(get_logger(), "Queries '%s', '%s' and '%s' must have a size of at least %zu.", position_query.c_str(), velocity_query.c_str(),
+			effort_query.c_str(), kChannels);
 		return hardware_interface::CallbackReturn::ERROR;
 	}
 
@@ -320,14 +351,18 @@ hardware_interface::CallbackReturn RoboteqHardwareInterface::on_configure(const 
 	{
 		position_state_handles_.clear();
 		velocity_state_handles_.clear();
+		effort_state_handles_.clear();
 		position_command_handles_.clear();
 		velocity_command_handles_.clear();
+		effort_command_handles_.clear();
 		for (const auto& joint_name : joint_names_)
 		{
 			position_state_handles_.push_back(get_state_interface_handle(joint_name + "/" + hardware_interface::HW_IF_POSITION));
 			velocity_state_handles_.push_back(get_state_interface_handle(joint_name + "/" + hardware_interface::HW_IF_VELOCITY));
+			effort_state_handles_.push_back(get_state_interface_handle(joint_name + "/" + hardware_interface::HW_IF_EFFORT));
 			position_command_handles_.push_back(get_command_interface_handle(joint_name + "/" + hardware_interface::HW_IF_POSITION));
 			velocity_command_handles_.push_back(get_command_interface_handle(joint_name + "/" + hardware_interface::HW_IF_VELOCITY));
+			effort_command_handles_.push_back(get_command_interface_handle(joint_name + "/" + hardware_interface::HW_IF_EFFORT));
 		}
 
 		for (auto& [query, state] : queries_)
@@ -352,8 +387,11 @@ hardware_interface::CallbackReturn RoboteqHardwareInterface::on_configure(const 
 		joints_velocity_transmission_passthrough_[i] = kNaN;
 		actuators_position_transmission_passthrough_[i] = kNaN;
 		actuators_velocity_transmission_passthrough_[i] = kNaN;
+		joints_effort_transmission_passthrough_[i] = kNaN;
+		actuators_effort_transmission_passthrough_[i] = kNaN;
 		std::ignore = set_state(position_state_handles_[i], 0.0, true);
 		std::ignore = set_state(velocity_state_handles_[i], 0.0, true);
+		std::ignore = set_state(effort_state_handles_[i], 0.0, true);
 	}
 
 	if (!serial_port_.open(params_.serial.port, params_.serial.baud, serial_error_))
@@ -392,18 +430,17 @@ hardware_interface::CallbackReturn RoboteqHardwareInterface::on_activate(const r
 	{
 		std::ignore = set_command(position_command_handles_[i], kNaN, true);
 		std::ignore = set_command(velocity_command_handles_[i], kNaN, true);
+		std::ignore = set_command(effort_command_handles_[i], kNaN, true);
 		last_position_commands_[i] = kNaN;
 	}
-	position_controller_running_ = false;
-	velocity_controller_running_ = false;
+	control_mode_ = ControlMode::NONE;
 
 	return hardware_interface::CallbackReturn::SUCCESS;
 }
 
 hardware_interface::CallbackReturn RoboteqHardwareInterface::on_deactivate(const rclcpp_lifecycle::State& /*previous_state*/)
 {
-	position_controller_running_ = false;
-	velocity_controller_running_ = false;
+	control_mode_ = ControlMode::NONE;
 
 	// Stop both motors but keep the communication open so that states can still be read
 	if (serial_port_.is_open() && !serial_port_.write("!MS 1\r!MS 2\r", serial_error_))
@@ -561,6 +598,7 @@ hardware_interface::return_type RoboteqHardwareInterface::read(const rclcpp::Tim
 		// actuator: state -> transmission
 		actuators_position_transmission_passthrough_[ch] = counts_to_rad(static_cast<double>(actuator_position_counts_[ch]));
 		actuators_velocity_transmission_passthrough_[ch] = (velocity_query_->values[ch] * (2 * M_PI)) / 60; // Conversion from RPM to rad/s
+		actuators_effort_transmission_passthrough_[ch] = effort_query_->values[ch] / 10.0; // ?A reports Amps * 10
 
 		// transmission: actuator -> joint
 		transmissions_[ch]->actuator_to_joint();
@@ -568,6 +606,7 @@ hardware_interface::return_type RoboteqHardwareInterface::read(const rclcpp::Tim
 		// joint: transmission -> state
 		std::ignore = set_state(position_state_handles_[ch], joints_position_transmission_passthrough_[ch], false);
 		std::ignore = set_state(velocity_state_handles_[ch], joints_velocity_transmission_passthrough_[ch], false);
+		std::ignore = set_state(effort_state_handles_[ch], joints_effort_transmission_passthrough_[ch], false);
 	}
 
 	return hardware_interface::return_type::OK;
@@ -581,7 +620,7 @@ hardware_interface::return_type RoboteqHardwareInterface::write(const rclcpp::Ti
 		return hardware_interface::return_type::ERROR;
 	}
 
-	if (!position_controller_running_ && !velocity_controller_running_)
+	if (control_mode_ == ControlMode::NONE)
 	{
 		return hardware_interface::return_type::OK;
 	}
@@ -593,35 +632,59 @@ hardware_interface::return_type RoboteqHardwareInterface::write(const rclcpp::Ti
 		const std::string channel = std::to_string(ch + 1);
 		double command;
 
-		if (position_controller_running_)
+		switch (control_mode_)
 		{
-			if (!get_command(position_command_handles_[ch], command, false) || std::isnan(command) || command == last_position_commands_[ch])
+			case ControlMode::POSITION:
 			{
-				continue;
+				if (!get_command(position_command_handles_[ch], command, false) || std::isnan(command) || command == last_position_commands_[ch])
+				{
+					continue;
+				}
+
+				// joint: command -> transmission -> actuator
+				joints_position_transmission_passthrough_[ch] = command;
+				transmissions_[ch]->joint_to_actuator();
+
+				// !PR is a relative move, so send the distance between the target and the current position
+				const int64_t target_counts = std::llround(rad_to_counts(actuators_position_transmission_passthrough_[ch]));
+				serial_command_ += "!PR " + channel + " " + std::to_string(target_counts - actuator_position_counts_[ch]) + "\r";
+				last_position_commands_[ch] = command;
+				break;
 			}
-
-			// joint: command -> transmission -> actuator
-			joints_position_transmission_passthrough_[ch] = command;
-			transmissions_[ch]->joint_to_actuator();
-
-			// !PR is a relative move, so send the distance between the target and the current position
-			const int64_t target_counts = std::llround(rad_to_counts(actuators_position_transmission_passthrough_[ch]));
-			serial_command_ += "!PR " + channel + " " + std::to_string(target_counts - actuator_position_counts_[ch]) + "\r";
-			last_position_commands_[ch] = command;
-		}
-		else
-		{
-			if (!get_command(velocity_command_handles_[ch], command, false) || std::isnan(command))
+			case ControlMode::VELOCITY:
 			{
-				continue;
+				if (!get_command(velocity_command_handles_[ch], command, false) || std::isnan(command))
+				{
+					continue;
+				}
+
+				// joint: command -> transmission -> actuator
+				joints_velocity_transmission_passthrough_[ch] = command;
+				transmissions_[ch]->joint_to_actuator();
+
+				const int64_t rpm = std::llround((actuators_velocity_transmission_passthrough_[ch] / (2 * M_PI)) * 60); // Conversion to RPM from rad/s
+				serial_command_ += "!S " + channel + " " + std::to_string(rpm) + "\r";
+				break;
 			}
+			case ControlMode::EFFORT:
+			{
+				if (!get_command(effort_command_handles_[ch], command, false) || std::isnan(command))
+				{
+					continue;
+				}
 
-			// joint: command -> transmission -> actuator
-			joints_velocity_transmission_passthrough_[ch] = command;
-			transmissions_[ch]->joint_to_actuator();
+				// joint: command -> transmission -> actuator
+				joints_effort_transmission_passthrough_[ch] = command;
+				transmissions_[ch]->joint_to_actuator();
 
-			const int64_t rpm = std::llround((actuators_velocity_transmission_passthrough_[ch] / (2 * M_PI)) * 60); // Conversion to RPM from rad/s
-			serial_command_ += "!S " + channel + " " + std::to_string(rpm) + "\r";
+				// !G in torque mode is the per-mille of the Amps Limit
+				const int64_t torque = std::clamp<int64_t>(
+					std::llround((actuators_effort_transmission_passthrough_[ch] / params_.effort.amps_limit) * 1000), -1000, 1000);
+				serial_command_ += "!G " + channel + " " + std::to_string(torque) + "\r";
+				break;
+			}
+			case ControlMode::NONE:
+				break;
 		}
 	}
 
@@ -646,29 +709,33 @@ hardware_interface::return_type RoboteqHardwareInterface::prepare_command_mode_s
 	start_modes_.clear();
 	stop_modes_.clear();
 
-	// Starting interfaces
-	// add start interface per joint in tmp var for later check
-	for (const auto& key : start_interfaces)
+	const auto collect_modes = [this](const std::vector<std::string>& interfaces, std::vector<std::string>& modes)
 	{
-		for (const auto& joint_name : joint_names_)
+		for (const auto& key : interfaces)
 		{
-			if (key == joint_name + "/" + hardware_interface::HW_IF_POSITION)
+			for (const auto& joint_name : joint_names_)
 			{
-				start_modes_.push_back(hardware_interface::HW_IF_POSITION);
-			}
-			if (key == joint_name + "/" + hardware_interface::HW_IF_VELOCITY)
-			{
-				start_modes_.push_back(hardware_interface::HW_IF_VELOCITY);
+				for (const char* mode : {hardware_interface::HW_IF_POSITION, hardware_interface::HW_IF_VELOCITY, hardware_interface::HW_IF_EFFORT})
+				{
+					if (key == joint_name + "/" + mode)
+					{
+						modes.push_back(mode);
+					}
+				}
 			}
 		}
-	}
+	};
+
+	// Starting interfaces
+	// add start interface per joint in tmp var for later check
+	collect_modes(start_interfaces, start_modes_);
 	// set new mode to all interfaces at the same time
 	if (start_modes_.size() != 0 && start_modes_.size() != kChannels)
 	{
 		ret_val = hardware_interface::return_type::ERROR;
 	}
 
-	// all start interfaces must be the same - can't mix position and velocity control
+	// all start interfaces must be the same - can't mix position, velocity and effort control
 	if (start_modes_.size() != 0 && !std::equal(start_modes_.begin() + 1, start_modes_.end(), start_modes_.begin()))
 	{
 		ret_val = hardware_interface::return_type::ERROR;
@@ -676,27 +743,14 @@ hardware_interface::return_type RoboteqHardwareInterface::prepare_command_mode_s
 
 	// Stopping interfaces
 	// add stop interface per joint in tmp var for later check
-	for (const auto& key : stop_interfaces)
-	{
-		for (const auto& joint_name : joint_names_)
-		{
-			if (key == joint_name + "/" + hardware_interface::HW_IF_POSITION)
-			{
-				stop_modes_.push_back(hardware_interface::HW_IF_POSITION);
-			}
-			if (key == joint_name + "/" + hardware_interface::HW_IF_VELOCITY)
-			{
-				stop_modes_.push_back(hardware_interface::HW_IF_VELOCITY);
-			}
-		}
-	}
+	collect_modes(stop_interfaces, stop_modes_);
 	// stop all interfaces at the same time
 	if (stop_modes_.size() != 0 && stop_modes_.size() != kChannels)
 	{
 		ret_val = hardware_interface::return_type::ERROR;
 	}
 
-	// all stop interfaces must be the same - can't mix position and velocity control
+	// all stop interfaces must be the same - can't mix position, velocity and effort control
 	if (stop_modes_.size() != 0 && !std::equal(stop_modes_.begin() + 1, stop_modes_.end(), stop_modes_.begin()))
 	{
 		ret_val = hardware_interface::return_type::ERROR;
@@ -707,37 +761,70 @@ hardware_interface::return_type RoboteqHardwareInterface::prepare_command_mode_s
 
 hardware_interface::return_type RoboteqHardwareInterface::perform_command_mode_switch(const std::vector<std::string>& /*start_interfaces*/, const std::vector<std::string>& /*stop_interfaces*/)
 {
-	if (!stop_modes_.empty() && stop_modes_.front() == hardware_interface::HW_IF_POSITION)
+	if (stop_modes_.empty() && start_modes_.empty())
 	{
-		position_controller_running_ = false;
+		return hardware_interface::return_type::OK;
 	}
-	else if (!stop_modes_.empty() && stop_modes_.front() == hardware_interface::HW_IF_VELOCITY)
+
+	const auto reset_commands = [this](const std::vector<hardware_interface::CommandInterface::SharedPtr>& handles)
 	{
-		velocity_controller_running_ = false;
-		for (const auto& handle : velocity_command_handles_)
+		for (const auto& handle : handles)
 		{
 			std::ignore = set_command(handle, 0.0, false);
+		}
+	};
+
+	if (!stop_modes_.empty())
+	{
+		control_mode_ = ControlMode::NONE;
+		if (stop_modes_.front() == hardware_interface::HW_IF_VELOCITY)
+		{
+			reset_commands(velocity_command_handles_);
+		}
+		else if (stop_modes_.front() == hardware_interface::HW_IF_EFFORT)
+		{
+			reset_commands(effort_command_handles_);
 		}
 	}
 
+	// Stop both motors before changing mode, otherwise the last setpoint (e.g. a torque) would persist
+	std::string serial_command = "!MS 1\r!MS 2\r";
+	int64_t operating_mode = -1;
+
 	if (!start_modes_.empty() && start_modes_.front() == hardware_interface::HW_IF_POSITION)
 	{
-		velocity_controller_running_ = false;
 		std::fill(last_position_commands_.begin(), last_position_commands_.end(), kNaN);
-		position_controller_running_ = true;
+		control_mode_ = ControlMode::POSITION;
+		operating_mode = params_.operating_modes.position;
 	}
 	else if (!start_modes_.empty() && start_modes_.front() == hardware_interface::HW_IF_VELOCITY)
 	{
-		position_controller_running_ = false;
-		for (const auto& handle : velocity_command_handles_)
-		{
-			std::ignore = set_command(handle, 0.0, false);
-		}
-		velocity_controller_running_ = true;
+		reset_commands(velocity_command_handles_);
+		control_mode_ = ControlMode::VELOCITY;
+		operating_mode = params_.operating_modes.velocity;
+	}
+	else if (!start_modes_.empty() && start_modes_.front() == hardware_interface::HW_IF_EFFORT)
+	{
+		reset_commands(effort_command_handles_);
+		control_mode_ = ControlMode::EFFORT;
+		operating_mode = params_.operating_modes.effort;
+	}
+
+	if (operating_mode >= 0)
+	{
+		const std::string mode = std::to_string(operating_mode);
+		serial_command += "^MMOD 1 " + mode + "\r^MMOD 2 " + mode + "\r";
 	}
 
 	start_modes_.clear();
 	stop_modes_.clear();
+
+	if (!serial_port_.is_open() || !serial_port_.write(serial_command, serial_error_))
+	{
+		RCLCPP_ERROR(get_logger(), "Failed to switch the operating mode: %s", serial_port_.is_open() ? serial_error_.c_str() : "Serial Port is not open");
+		control_mode_ = ControlMode::NONE;
+		return hardware_interface::return_type::ERROR;
+	}
 
 	return hardware_interface::return_type::OK;
 }

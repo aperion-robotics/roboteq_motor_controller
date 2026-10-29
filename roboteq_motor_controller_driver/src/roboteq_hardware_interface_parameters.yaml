@@ -26,7 +26,46 @@ roboteq_motor_controller_driver:
         gt<>: [0],
       }
     }
-  
+
+  effort:
+    amps_limit: {
+      type: double,
+      read_only: true,
+      description: "Amps Limit configured in the controller. An effort command of amps_limit maps to !G 1000",
+      validation: {
+        gt<>: [0.0],
+      }
+    }
+
+  operating_modes:
+    position: {
+      type: int,
+      default_value: 3,
+      read_only: true,
+      description: "Operating mode (^MMOD) used for position control. 3 = closed-loop count position",
+      validation: {
+        bounds<>: [0, 6],
+      }
+    }
+    velocity: {
+      type: int,
+      default_value: 1,
+      read_only: true,
+      description: "Operating mode (^MMOD) used for velocity control. 1 = closed-loop speed",
+      validation: {
+        bounds<>: [0, 6],
+      }
+    }
+    effort: {
+      type: int,
+      default_value: 5,
+      read_only: true,
+      description: "Operating mode (^MMOD) used for effort control. 5 = torque",
+      validation: {
+        bounds<>: [0, 6],
+      }
+    }
+
   queries_list: {
     type: string_array,
     read_only: true,

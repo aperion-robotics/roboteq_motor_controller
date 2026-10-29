@@ -50,6 +50,14 @@ public:
 	hardware_interface::return_type perform_command_mode_switch(const std::vector<std::string>& start_interfaces, const std::vector<std::string>& stop_interfaces) override;
 
 private:
+	enum class ControlMode
+	{
+		NONE,
+		POSITION,
+		VELOCITY,
+		EFFORT
+	};
+
 	// Latest response of a single Roboteq query and the state interfaces exposing it
 	struct QueryState
 	{
@@ -75,18 +83,23 @@ private:
 	std::vector<double> actuators_position_transmission_passthrough_;
 	std::vector<double> joints_velocity_transmission_passthrough_;
 	std::vector<double> actuators_velocity_transmission_passthrough_;
+	std::vector<double> joints_effort_transmission_passthrough_;
+	std::vector<double> actuators_effort_transmission_passthrough_;
 	std::vector<int64_t> actuator_position_counts_;
 	std::vector<double> last_position_commands_;
 
 	std::vector<hardware_interface::StateInterface::SharedPtr> position_state_handles_;
 	std::vector<hardware_interface::StateInterface::SharedPtr> velocity_state_handles_;
+	std::vector<hardware_interface::StateInterface::SharedPtr> effort_state_handles_;
 	std::vector<hardware_interface::CommandInterface::SharedPtr> position_command_handles_;
 	std::vector<hardware_interface::CommandInterface::SharedPtr> velocity_command_handles_;
+	std::vector<hardware_interface::CommandInterface::SharedPtr> effort_command_handles_;
 
 	// Roboteq queries, keyed by query code (e.g. "CR")
 	std::unordered_map<std::string, QueryState> queries_;
 	QueryState* position_query_{nullptr};
 	QueryState* velocity_query_{nullptr};
+	QueryState* effort_query_{nullptr};
 	std::string serial_query_;
 	std::string serial_command_;
 	std::vector<std::string> queries_response_list_;
@@ -99,8 +112,7 @@ private:
 	// resources switching aux vars
 	std::vector<std::string> stop_modes_;
 	std::vector<std::string> start_modes_;
-	bool position_controller_running_{false};
-	bool velocity_controller_running_{false};
+	ControlMode control_mode_{ControlMode::NONE};
 };
 } // namespace roboteq_motor_controller_driver
 

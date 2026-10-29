@@ -1,0 +1,6 @@
+# Single raw Roboteq command, e.g. "^MMOD 1 5", "~MXRPM 1", "?A 1", "%EESAV"
+string command
+---
+bool success      # reply received and not "-"
+string response   # raw reply line, e.g. "+", "-", "A=12:13"
+string message    # error description when success is false

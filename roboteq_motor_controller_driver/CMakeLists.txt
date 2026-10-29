@@ -44,6 +44,7 @@ target_link_libraries(roboteq_motor_controller_driver_plugin
     rclcpp_lifecycle::rclcpp_lifecycle
     hardware_interface::hardware_interface
     transmission_interface::transmission_interface
+    ${roboteq_motor_controller_msgs_TARGETS}
   PRIVATE
     pluginlib::pluginlib
 )

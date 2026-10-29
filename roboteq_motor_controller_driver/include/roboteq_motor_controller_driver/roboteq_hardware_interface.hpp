@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -20,6 +21,7 @@
 #include "rclcpp_lifecycle/node_interfaces/lifecycle_node_interface.hpp"
 #include "rclcpp_lifecycle/state.hpp"
 #include "roboteq_motor_controller_driver/roboteq_hardware_interface_parameters.hpp"
+#include "roboteq_motor_controller_msgs/srv/send_command.hpp"
 #include "roboteq_motor_controller_driver/serial_port.hpp"
 
 namespace roboteq_motor_controller_driver
@@ -69,6 +71,9 @@ private:
 
 	// Parse a single "<query>=<v1>:<v2>..." response into its query state
 	void handle_response(std::string_view line);
+	// Send a single raw command and wait for its reply. Runs in the executor thread, never in the control loop
+	void handle_send_command(const std::shared_ptr<roboteq_motor_controller_msgs::srv::SendCommand::Request> request,
+		std::shared_ptr<roboteq_motor_controller_msgs::srv::SendCommand::Response> response);
 	double counts_to_rad(double counts) const;
 	double rad_to_counts(double rad) const;
 
@@ -106,8 +111,16 @@ private:
 	size_t queries_received_{0};
 
 	// Serial
+	// The control loop only try_locks serial_mutex_ and skips the cycle's I/O if the command service holds it
+	std::mutex serial_mutex_;
 	SerialPort serial_port_;
 	std::string serial_error_;
+	// Mode switch commands queued by perform_command_mode_switch, sent by the next write()
+	std::string pending_serial_command_;
+
+	// Raw command service
+	rclcpp::CallbackGroup::SharedPtr command_callback_group_;
+	rclcpp::Service<roboteq_motor_controller_msgs::srv::SendCommand>::SharedPtr command_service_;
 
 	// resources switching aux vars
 	std::vector<std::string> stop_modes_;

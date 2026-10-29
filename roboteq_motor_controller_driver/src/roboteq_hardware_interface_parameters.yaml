@@ -17,6 +17,15 @@ roboteq_motor_controller_driver:
         gt<>: [0],
       }
     }
+    command_timeout_ms: {
+      type: int,
+      default_value: 100,
+      read_only: true,
+      description: "Time the send_command service waits for a reply. Upper bound on how long the control loop skips serial I/O per call",
+      validation: {
+        gt<>: [0],
+      }
+    }
 
   encoder:
     cpr: {

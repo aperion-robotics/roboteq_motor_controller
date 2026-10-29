@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <charconv>
+#include <cctype>
 #include <cmath>
 #include <limits>
 #include <string_view>
@@ -18,11 +19,14 @@ namespace roboteq_motor_controller_driver
 constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
 constexpr int kThrottleMs = 1000;
 constexpr size_t kChannels = 2;
+// Silence required before sending a service command, so that late replies to the control loop are not mistaken for its reply
+constexpr int kDrainQuietMs = 5;
 
 RoboteqHardwareInterface::~RoboteqHardwareInterface()
 {
 	// If the controller manager is shutdown via Ctrl + C the on_cleanup/on_shutdown methods won't be called.
 	// We therefore need to make sure to actually close the communication
+	std::lock_guard<std::mutex> lock(serial_mutex_);
 	serial_port_.close();
 }
 
@@ -323,7 +327,20 @@ hardware_interface::CallbackReturn RoboteqHardwareInterface::on_init(const hardw
 	}
 
 	queries_response_list_.reserve(2 * params_.queries_list.size());
-	serial_command_.reserve(64);
+	serial_command_.reserve(128);
+	pending_serial_command_.reserve(64);
+
+	// Raw command access for configuration and diagnostics. Commands bypass the active controller
+	// (e.g. a !S is overridden on the next cycle and a ^MMOD desyncs the control mode), use with care.
+	// The callback runs in the executor thread on its own callback group so that it doesn't block the parameter services.
+	command_callback_group_ = get_node()->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+	command_service_ = get_node()->create_service<roboteq_motor_controller_msgs::srv::SendCommand>("~/send_command",
+		[this](const std::shared_ptr<roboteq_motor_controller_msgs::srv::SendCommand::Request> request,
+			std::shared_ptr<roboteq_motor_controller_msgs::srv::SendCommand::Response> response)
+		{
+			handle_send_command(request, response);
+		},
+		rclcpp::ServicesQoS(), command_callback_group_);
 
 	return hardware_interface::CallbackReturn::SUCCESS;
 }
@@ -394,6 +411,7 @@ hardware_interface::CallbackReturn RoboteqHardwareInterface::on_configure(const 
 		std::ignore = set_state(effort_state_handles_[i], 0.0, true);
 	}
 
+	std::lock_guard<std::mutex> lock(serial_mutex_);
 	if (!serial_port_.open(params_.serial.port, params_.serial.baud, serial_error_))
 	{
 		RCLCPP_ERROR(get_logger(), "%s", serial_error_.c_str());
@@ -414,12 +432,14 @@ hardware_interface::CallbackReturn RoboteqHardwareInterface::on_configure(const 
 
 hardware_interface::CallbackReturn RoboteqHardwareInterface::on_cleanup(const rclcpp_lifecycle::State & /*previous_state*/)
 {
+	std::lock_guard<std::mutex> lock(serial_mutex_);
 	serial_port_.close();
 	return hardware_interface::CallbackReturn::SUCCESS;
 }
 
 hardware_interface::CallbackReturn RoboteqHardwareInterface::on_shutdown(const rclcpp_lifecycle::State & /*previous_state*/)
 {
+	std::lock_guard<std::mutex> lock(serial_mutex_);
 	serial_port_.close();
 	return hardware_interface::CallbackReturn::SUCCESS;
 }
@@ -435,12 +455,18 @@ hardware_interface::CallbackReturn RoboteqHardwareInterface::on_activate(const r
 	}
 	control_mode_ = ControlMode::NONE;
 
+	std::lock_guard<std::mutex> lock(serial_mutex_);
+	pending_serial_command_.clear();
+
 	return hardware_interface::CallbackReturn::SUCCESS;
 }
 
 hardware_interface::CallbackReturn RoboteqHardwareInterface::on_deactivate(const rclcpp_lifecycle::State& /*previous_state*/)
 {
 	control_mode_ = ControlMode::NONE;
+
+	std::lock_guard<std::mutex> lock(serial_mutex_);
+	pending_serial_command_.clear();
 
 	// Stop both motors but keep the communication open so that states can still be read
 	if (serial_port_.is_open() && !serial_port_.write("!MS 1\r!MS 2\r", serial_error_))
@@ -519,6 +545,15 @@ void RoboteqHardwareInterface::handle_response(std::string_view line)
 
 hardware_interface::return_type RoboteqHardwareInterface::read(const rclcpp::Time & /*time*/, const rclcpp::Duration & /*period*/)
 {
+	// Never block the control loop: if the command service is using the port, skip this cycle and keep the last states.
+	// No counts are lost since the relative position query accumulates them until the next read.
+	std::unique_lock<std::mutex> lock(serial_mutex_, std::try_to_lock);
+	if (!lock.owns_lock())
+	{
+		RCLCPP_DEBUG_THROTTLE(get_logger(), *get_clock(), kThrottleMs, "Serial port busy with a service command, skipping read");
+		return hardware_interface::return_type::OK;
+	}
+
 	if (!serial_port_.is_open())
 	{
 		RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), kThrottleMs, "Serial Port is not open");
@@ -614,18 +649,24 @@ hardware_interface::return_type RoboteqHardwareInterface::read(const rclcpp::Tim
 
 hardware_interface::return_type RoboteqHardwareInterface::write(const rclcpp::Time & /*time*/, const rclcpp::Duration & /*period*/)
 {
+	// Never block the control loop: if the command service is using the port, skip this cycle.
+	// The commands (and any pending mode switch) are sent on the next cycle.
+	std::unique_lock<std::mutex> lock(serial_mutex_, std::try_to_lock);
+	if (!lock.owns_lock())
+	{
+		RCLCPP_DEBUG_THROTTLE(get_logger(), *get_clock(), kThrottleMs, "Serial port busy with a service command, skipping write");
+		return hardware_interface::return_type::OK;
+	}
+
 	if (!serial_port_.is_open())
 	{
 		RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), kThrottleMs, "Serial Port is not open");
 		return hardware_interface::return_type::ERROR;
 	}
 
-	if (control_mode_ == ControlMode::NONE)
-	{
-		return hardware_interface::return_type::OK;
-	}
-
-	serial_command_.clear();
+	// Mode switch commands go first so that they reach the controller before the commands of the new mode
+	serial_command_ = pending_serial_command_;
+	pending_serial_command_.clear();
 
 	for (size_t ch = 0; ch < kChannels; ++ch)
 	{
@@ -787,8 +828,9 @@ hardware_interface::return_type RoboteqHardwareInterface::perform_command_mode_s
 		}
 	}
 
-	// Stop both motors before changing mode, otherwise the last setpoint (e.g. a torque) would persist
-	std::string serial_command = "!MS 1\r!MS 2\r";
+	// Stop both motors before changing mode, otherwise the last setpoint (e.g. a torque) would persist.
+	// The commands are sent by the next write() since the serial port may be busy with a service command.
+	pending_serial_command_ = "!MS 1\r!MS 2\r";
 	int64_t operating_mode = -1;
 
 	if (!start_modes_.empty() && start_modes_.front() == hardware_interface::HW_IF_POSITION)
@@ -813,20 +855,110 @@ hardware_interface::return_type RoboteqHardwareInterface::perform_command_mode_s
 	if (operating_mode >= 0)
 	{
 		const std::string mode = std::to_string(operating_mode);
-		serial_command += "^MMOD 1 " + mode + "\r^MMOD 2 " + mode + "\r";
+		pending_serial_command_ += "^MMOD 1 " + mode + "\r^MMOD 2 " + mode + "\r";
 	}
 
 	start_modes_.clear();
 	stop_modes_.clear();
 
-	if (!serial_port_.is_open() || !serial_port_.write(serial_command, serial_error_))
+	return hardware_interface::return_type::OK;
+}
+
+void RoboteqHardwareInterface::handle_send_command(const std::shared_ptr<roboteq_motor_controller_msgs::srv::SendCommand::Request> request,
+	std::shared_ptr<roboteq_motor_controller_msgs::srv::SendCommand::Response> response)
+{
+	response->success = false;
+
+	const std::string& raw = request->command;
+	const size_t first = raw.find_first_not_of(" \t");
+	if (first == std::string::npos)
 	{
-		RCLCPP_ERROR(get_logger(), "Failed to switch the operating mode: %s", serial_port_.is_open() ? serial_error_.c_str() : "Serial Port is not open");
-		control_mode_ = ControlMode::NONE;
-		return hardware_interface::return_type::ERROR;
+		response->message = "Empty command";
+		return;
+	}
+	const std::string command = raw.substr(first, raw.find_last_not_of(" \t") - first + 1);
+
+	if (std::string_view("!^~?%").find(command.front()) == std::string_view::npos)
+	{
+		response->message = "Commands must start with one of ! ^ ~ ? %";
+		return;
 	}
 
-	return hardware_interface::return_type::OK;
+	// '_' is also a command terminator, so it would allow several commands and break the reply matching
+	if (command.find_first_of("\r\n_") != std::string::npos)
+	{
+		response->message = "Only a single command per call is allowed (no \\r, \\n or _)";
+		return;
+	}
+
+	// Queries and config reads reply with "<CODE>=...", everything else with "+" or "-"
+	std::string reply_prefix;
+	if (command.front() == '?' || command.front() == '~')
+	{
+		reply_prefix = command.substr(1, command.find_first_of(" \t") - 1);
+		std::transform(reply_prefix.begin(), reply_prefix.end(), reply_prefix.begin(), [](unsigned char c) { return std::toupper(c); });
+		reply_prefix += '=';
+	}
+
+	std::lock_guard<std::mutex> lock(serial_mutex_);
+
+	if (!serial_port_.is_open())
+	{
+		response->message = "Serial Port is not open";
+		return;
+	}
+
+	std::string error;
+	std::string_view line;
+	SerialPort::ReadResult result;
+
+	// Drop stale lines (e.g. late replies to the control loop) until the port has been quiet for a while
+	do
+	{
+		result = serial_port_.read_line(line, std::chrono::steady_clock::now() + std::chrono::milliseconds(kDrainQuietMs), error);
+	} while (result == SerialPort::ReadResult::LINE);
+
+	if (result == SerialPort::ReadResult::ERROR || !serial_port_.write(command + "\r", error))
+	{
+		response->message = error;
+		RCLCPP_ERROR(get_logger(), "Command '%s' failed: %s", command.c_str(), error.c_str());
+		return;
+	}
+
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(params_.serial.command_timeout_ms);
+	while (true)
+	{
+		result = serial_port_.read_line(line, deadline, error);
+		if (result == SerialPort::ReadResult::ERROR)
+		{
+			response->message = error;
+			RCLCPP_ERROR(get_logger(), "Command '%s' failed: %s", command.c_str(), error.c_str());
+			return;
+		}
+
+		if (result == SerialPort::ReadResult::TIMEOUT)
+		{
+			response->message = "Timed out waiting for reply";
+			RCLCPP_WARN(get_logger(), "Command '%s' timed out waiting for reply", command.c_str());
+			return;
+		}
+
+		const bool is_reply = (line == "-") ||
+			(reply_prefix.empty() ? line == "+" : line.substr(0, reply_prefix.size()) == reply_prefix);
+		if (!is_reply)
+		{
+			continue;
+		}
+
+		response->response = std::string(line);
+		response->success = (line != "-");
+		if (!response->success)
+		{
+			response->message = "Command rejected by the controller";
+		}
+		RCLCPP_INFO(get_logger(), "Command '%s' -> '%s'", command.c_str(), response->response.c_str());
+		return;
+	}
 }
 
 double RoboteqHardwareInterface::counts_to_rad(double counts) const

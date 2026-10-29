@@ -80,6 +80,34 @@ roboteq_motor_controller_driver:
     }
   }
 
+  configuration_list: {
+    type: string_array,
+    default_value: [],
+    read_only: true,
+    description: "Configuration settings (e.g. ALIM) checked at configure and set when they differ",
+    validation: {
+      unique<>: [],
+    }
+  }
+
+  configuration:
+    __map_configuration_list:
+      values: {
+        type: int_array,
+        read_only: true,
+        description: "Raw Roboteq values (as returned by ~X). One value for global settings, one per channel otherwise",
+        validation: {
+          not_empty<>: [],
+        }
+      }
+
+  configuration_save_to_eeprom: {
+    type: bool,
+    default_value: false,
+    read_only: true,
+    description: "Run %EESAV after changing any setting so that it persists without the driver",
+  }
+
   queries:
     __map_queries_list:
       name: {

@@ -234,6 +234,26 @@ hardware_interface::CallbackReturn RoboteqHardwareInterface::on_init(const hardw
 		return hardware_interface::CallbackReturn::ERROR;
 	}
 
+	// Settings managed by the driver itself can't be part of the configuration
+	for (const auto& name : params_.configuration_list)
+	{
+		std::string upper_name = name;
+		std::transform(upper_name.begin(), upper_name.end(), upper_name.begin(), [](unsigned char c) { return std::toupper(c); });
+		if (upper_name == "MMOD" || upper_name == "ECHOF")
+		{
+			RCLCPP_FATAL(get_logger(), "%s can't be part of the configuration, it is managed by the driver%s.", name.c_str(),
+				upper_name == "MMOD" ? " (see the operating_modes parameters)" : "");
+			return hardware_interface::CallbackReturn::ERROR;
+		}
+
+		if (params_.configuration.configuration_list_map.at(name).values.size() > kChannels)
+		{
+			RCLCPP_FATAL(get_logger(), "%s has %zu values. 1 (global) or up to %zu (per channel) expected.", name.c_str(),
+				params_.configuration.configuration_list_map.at(name).values.size(), kChannels);
+			return hardware_interface::CallbackReturn::ERROR;
+		}
+	}
+
 	const auto contains_query = [this](const std::string& query)
 	{
 		return std::find(params_.queries_list.begin(), params_.queries_list.end(), query) != params_.queries_list.end();
@@ -420,6 +440,14 @@ hardware_interface::CallbackReturn RoboteqHardwareInterface::on_configure(const 
 	RCLCPP_INFO(get_logger(), "Serial Port initialized");
 	// Disable echo and clear buffer history
 	if (!serial_port_.write("^echof 1_# c_", serial_error_))
+	{
+		RCLCPP_ERROR(get_logger(), "%s", serial_error_.c_str());
+		serial_port_.close();
+		return hardware_interface::CallbackReturn::FAILURE;
+	}
+
+	// Make sure the controller is configured as expected before any controller can command the motors
+	if (!apply_configuration(serial_error_))
 	{
 		RCLCPP_ERROR(get_logger(), "%s", serial_error_.c_str());
 		serial_port_.close();
@@ -983,6 +1011,36 @@ bool RoboteqHardwareInterface::transact(const std::string& command, std::string&
 	}
 }
 
+bool RoboteqHardwareInterface::parse_reply_values(std::string_view reply, std::vector<int64_t>& values) const
+{
+	// Parse "<CODE>=v1:v2:..."
+	values.clear();
+	const size_t del_pos = reply.find('=');
+	if (del_pos == std::string_view::npos)
+	{
+		return false;
+	}
+
+	std::string_view data = reply.substr(del_pos + 1);
+	while (true)
+	{
+		const size_t sep = data.find(':');
+		const std::string_view token = data.substr(0, sep);
+		int64_t value;
+		const auto [ptr, ec] = std::from_chars(token.data(), token.data() + token.size(), value);
+		if (ec != std::errc() || ptr != token.data() + token.size())
+		{
+			return false;
+		}
+		values.push_back(value);
+		if (sep == std::string_view::npos)
+		{
+			return true;
+		}
+		data.remove_prefix(sep + 1);
+	}
+}
+
 bool RoboteqHardwareInterface::read_amps_limits(std::string& error)
 {
 	std::string reply;
@@ -992,29 +1050,105 @@ bool RoboteqHardwareInterface::read_amps_limits(std::string& error)
 		return false;
 	}
 
-	// Parse "ALIM=v1:v2", values are Amps * 10
-	std::array<double, kChannels> limits{};
-	std::string_view data = std::string_view(reply).substr(reply.find('=') + 1);
-	for (size_t ch = 0; ch < kChannels; ++ch)
+	// Values are Amps * 10
+	std::vector<int64_t> values;
+	if (!parse_reply_values(reply, values) || values.size() < kChannels ||
+		std::any_of(values.begin(), values.begin() + kChannels, [](int64_t value) { return value <= 0; }))
 	{
-		const size_t sep = data.find(':');
-		const std::string_view token = data.substr(0, sep);
-		double value;
-		const auto [ptr, ec] = std::from_chars(token.data(), token.data() + token.size(), value);
-		if (ec != std::errc() || value <= 0.0 || (sep == std::string_view::npos && ch + 1 < kChannels))
-		{
-			error = "Malformed Amps Limit reply: '" + reply + "'";
-			return false;
-		}
-		limits[ch] = value / 10.0;
-		data.remove_prefix(sep == std::string_view::npos ? data.size() : sep + 1);
+		error = "Malformed Amps Limit reply: '" + reply + "'";
+		return false;
 	}
 
 	for (size_t ch = 0; ch < kChannels; ++ch)
 	{
-		amps_limits_[ch].store(limits[ch], std::memory_order_relaxed);
+		amps_limits_[ch].store(values[ch] / 10.0, std::memory_order_relaxed);
 	}
-	RCLCPP_INFO(get_logger(), "Amps limits: %.1f A, %.1f A", limits[0], limits[1]);
+	RCLCPP_INFO(get_logger(), "Amps limits: %.1f A, %.1f A", values[0] / 10.0, values[1] / 10.0);
+
+	return true;
+}
+
+bool RoboteqHardwareInterface::apply_configuration(std::string& error)
+{
+	const auto join = [](const std::vector<int64_t>& values)
+	{
+		std::string joined;
+		for (const auto value : values)
+		{
+			joined += (joined.empty() ? "" : ":") + std::to_string(value);
+		}
+		return joined;
+	};
+
+	std::string reply;
+	std::vector<int64_t> current;
+
+	// Read the current values of a setting and check whether its leading values match the desired ones
+	const auto read_and_compare = [&](const std::string& name, const std::vector<int64_t>& desired, bool& matches)
+	{
+		if (!transact("~" + name, reply, error) || !parse_reply_values(reply, current))
+		{
+			error = "Unable to read " + name + ": " + (error.empty() ? "malformed reply '" + reply + "'" : error);
+			return false;
+		}
+		matches = current.size() >= desired.size() && std::equal(desired.begin(), desired.end(), current.begin());
+		return true;
+	};
+
+	size_t changed = 0;
+	for (const auto& name : params_.configuration_list)
+	{
+		const std::vector<int64_t>& desired = params_.configuration.configuration_list_map.at(name).values;
+		error.clear();
+
+		bool matches = false;
+		if (!read_and_compare(name, desired, matches))
+		{
+			return false;
+		}
+		if (matches)
+		{
+			RCLCPP_DEBUG(get_logger(), "%s is already %s", name.c_str(), join(desired).c_str());
+			continue;
+		}
+
+		RCLCPP_WARN(get_logger(), "%s is %s, setting %s", name.c_str(), join(current).c_str(), join(desired).c_str());
+
+		// A single value is a global setting, otherwise one value per channel
+		for (size_t i = 0; i < desired.size(); ++i)
+		{
+			const std::string command = "^" + name + " " + (desired.size() == 1 ? "" : std::to_string(i + 1) + " ") + std::to_string(desired[i]);
+			if (!transact(command, reply, error))
+			{
+				error = "Unable to set " + name + " ('" + command + "'): " + error;
+				return false;
+			}
+		}
+
+		// Verify, e.g. the controller may clamp out of range values
+		if (!read_and_compare(name, desired, matches))
+		{
+			return false;
+		}
+		if (!matches)
+		{
+			error = name + " is " + join(current) + " after setting it to " + join(desired);
+			return false;
+		}
+		++changed;
+	}
+
+	if (changed > 0 && params_.configuration_save_to_eeprom)
+	{
+		if (!transact("%EESAV", reply, error))
+		{
+			error = "Unable to save the configuration to EEPROM: " + error;
+			return false;
+		}
+		RCLCPP_INFO(get_logger(), "Configuration saved to EEPROM");
+	}
+
+	RCLCPP_INFO(get_logger(), "Configuration: %zu settings checked, %zu changed", params_.configuration_list.size(), changed);
 
 	return true;
 }

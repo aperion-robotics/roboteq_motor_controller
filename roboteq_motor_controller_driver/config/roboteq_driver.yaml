@@ -9,6 +9,18 @@
       cpr: 10000 # with quadrature
 
     # operating_modes: # ^MMOD sent on controller switch. Defaults: position 3, velocity 1, effort 5
+
+    # Settings checked at configure and set when they differ, in raw Roboteq units (as returned by ~X).
+    # One value for global settings, one per channel otherwise. MMOD and ECHOF are managed by the driver.
+    # configuration_list: ["ALIM", "MXRPM", "RWD"]
+    # configuration:
+    #   ALIM:
+    #     values: [600, 600] # 60.0 A per channel
+    #   MXRPM:
+    #     values: [3000, 3000]
+    #   RWD:
+    #     values: [1000] # serial watchdog ms
+    # configuration_save_to_eeprom: false
     
     queries_list: ["CR", "S", "A", "FS", "FF", "FM"]
 

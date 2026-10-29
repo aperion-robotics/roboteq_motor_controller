@@ -82,6 +82,11 @@ private:
 	bool transact(const std::string& command, std::string& reply, std::string& error);
 	// Read the Amps Limit of both channels (~ALIM) into amps_limits_. The caller must hold serial_mutex_
 	bool read_amps_limits(std::string& error);
+	// Check every setting of the configuration parameters (~X), set (^X) and verify those that differ.
+	// The caller must hold serial_mutex_
+	bool apply_configuration(std::string& error);
+	// Parse the values of a "<CODE>=v1:v2:..." reply
+	bool parse_reply_values(std::string_view reply, std::vector<int64_t>& values) const;
 	double counts_to_rad(double counts) const;
 	double rad_to_counts(double rad) const;
 

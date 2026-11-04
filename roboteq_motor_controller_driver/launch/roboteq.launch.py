@@ -21,6 +21,11 @@ def generate_launch_description():
             description="URDF/XACRO description file with the robot.",
         ),
         DeclareLaunchArgument(
+            "name",
+            default_value="robot",
+            description="Robot name",
+        ),
+        DeclareLaunchArgument(
             "prefix",
             default_value="",
             description="Prefix for link and joint names, for multi-robot setups",
@@ -54,6 +59,7 @@ def generate_launch_description():
 
     description_package = LaunchConfiguration("description_package")
     description_file = LaunchConfiguration("description_file")
+    name = LaunchConfiguration("name")
     prefix = LaunchConfiguration("prefix")
     launch_robot_state_publisher = LaunchConfiguration("launch_robot_state_publisher")
     config_package = LaunchConfiguration("config_package")
@@ -67,6 +73,9 @@ def generate_launch_description():
             PathJoinSubstitution([FindExecutable(name="xacro")]),
             " ",
             PathJoinSubstitution([FindPackageShare(description_package), "robots", description_file]),
+            " ",
+            "name:=",
+            name,
             " ",
             "prefix:=",
             prefix,

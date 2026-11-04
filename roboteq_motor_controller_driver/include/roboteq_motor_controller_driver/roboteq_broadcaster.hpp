@@ -3,7 +3,6 @@
 
 #include "realtime_tools/realtime_publisher.hpp"
 #include "rclcpp_lifecycle/lifecycle_publisher.hpp"
-#include "roboteq_motor_controller_driver/roboteq_hardware_interface_parameters.hpp"
 #include "roboteq_motor_controller_msgs/msg/query.hpp"
 #include "controller_interface/controller_interface.hpp"
 #include "rclcpp_lifecycle/node_interfaces/lifecycle_node_interface.hpp"
@@ -11,6 +10,14 @@
 namespace roboteq_broadcaster
 {
 
+/**
+ * Publishes the query state interfaces of one Roboteq hardware component.
+ *
+ * The queries are discovered from the state interfaces exported by the hardware component
+ * named by the 'hardware_name' parameter (<hardware_name>/<query_name>_<channel>), so the
+ * driver parameters do not need to be passed to the broadcaster. Each query is published on
+ * <hardware_name>/<query_name>, relative to the controller manager namespace.
+ */
 class RoboteqBroadcaster : public controller_interface::ControllerInterface
 {
 
@@ -29,14 +36,13 @@ public:
 
 private:
 	// ROS params
-	std::shared_ptr<roboteq_motor_controller_driver::ParamListener> param_listener_;
-	roboteq_motor_controller_driver::Params params_;
 	std::string hardware_name_;
 
-	// Publishers
-  	std::vector<std::shared_ptr<realtime_tools::RealtimePublisher<roboteq_motor_controller_msgs::msg::Query>>> realtime_roboteq_publishers_;
+	// Publishers, one per query
+	std::vector<std::shared_ptr<realtime_tools::RealtimePublisher<roboteq_motor_controller_msgs::msg::Query>>> realtime_roboteq_publishers_;
 	std::vector<roboteq_motor_controller_msgs::msg::Query> query_msgs_;
-	std::vector<int> cumulative_state_interface_index;
+	// For each query, the indices in state_interfaces_ of its channels, ordered by channel
+	std::vector<std::vector<size_t>> query_state_interface_indices_;
 };
 } // namespace roboteq_broadcaster
 

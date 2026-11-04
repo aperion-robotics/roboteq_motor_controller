@@ -12,6 +12,8 @@ controller_manager:
       type: roboteq_broadcaster/RoboteqBroadcaster
 
 
+# One broadcaster per Roboteq hardware component. hardware_name is the name attribute of its
+# <ros2_control> tag. The queries are published on <hardware_name>/<query_name>
 roboteq_broadcaster:
   ros__parameters:
     # TODO: set to the name attribute of the Roboteq <ros2_control name="..."> tag in the URDF
@@ -43,7 +45,6 @@ diff_drive_controller:
 
     cmd_vel_timeout: 0.5
     publish_limited_velocity: false
-    use_stamped_vel: false
     velocity_rolling_window_size: 10
 
     # Velocity, acceleration and jerk limits

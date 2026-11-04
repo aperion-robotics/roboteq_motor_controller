@@ -120,7 +120,8 @@ def generate_launch_description():
         ],
     )
 
-    # The broadcaster also needs the Roboteq driver parameters (queries list)
+    # One Roboteq broadcaster per hardware component. They discover the queries from the
+    # hardware state interfaces, so they don't need the Roboteq driver parameters
     roboteq_broadcaster_spawner = Node(
         package="controller_manager",
         executable="spawner",
@@ -132,8 +133,6 @@ def generate_launch_description():
             controller_spawner_timeout,
             "--param-file",
             controllers_configuration,
-            "--param-file",
-            roboteq_configuration,
         ],
     )
 

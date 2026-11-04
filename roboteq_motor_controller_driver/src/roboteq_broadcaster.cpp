@@ -1,58 +1,15 @@
 #include <cmath>
+#include <map>
 
 #include <roboteq_motor_controller_driver/roboteq_broadcaster.hpp>
-
-static const rclcpp::Logger LOGGER = rclcpp::get_logger("RoboteqBroadcaster");
 
 namespace roboteq_broadcaster
 {
 
-constexpr int kNaN = std::numeric_limits<int>::quiet_NaN();
-
-
 controller_interface::CallbackReturn RoboteqBroadcaster::on_init()
 {
-	
 	auto_declare<std::string>("hardware_name", "");
 
-	param_listener_ = std::make_shared<roboteq_motor_controller_driver::ParamListener>(get_node());
-	params_ = param_listener_->get_params();
-
-	const bool found_cr{std::find(params_.queries_list.begin(), params_.queries_list.end(), "CR") != params_.queries_list.end()};
-	const bool found_bcr{std::find(params_.queries_list.begin(), params_.queries_list.end(), "BCR") != params_.queries_list.end()};
-
-	if (!found_cr && !found_bcr)
-	{
-		params_.queries_list.push_back("BCR");
-		roboteq_motor_controller_driver::Params::Queries::MapQueriesList bcr_struct;
-		bcr_struct.name = "internal_sensor_count_relative";
-		bcr_struct.size = 2;
-		params_.queries.queries_list_map.insert({"BCR", bcr_struct});
-	}
-	
-	const bool found_s{std::find(params_.queries_list.begin(), params_.queries_list.end(), "S") != params_.queries_list.end()};
-	const bool found_bs{std::find(params_.queries_list.begin(), params_.queries_list.end(), "BS") != params_.queries_list.end()};
-
-	if (!found_s && !found_bs)
-	{
-		params_.queries_list.push_back("BS");
-		roboteq_motor_controller_driver::Params::Queries::MapQueriesList bs_struct;
-		bs_struct.name = "internal_sensor_motor_speed";
-		bs_struct.size = 2;
-		params_.queries.queries_list_map.insert({"BS", bs_struct});
-	}
-
-	// Check for duplicate names
-	std::unordered_set<std::string> name_set;
-	for (auto& map_item : params_.queries.queries_list_map)
-	{
-		if (!name_set.insert(map_item.second.name).second)
-		{
-			RCLCPP_FATAL(LOGGER, "Found duplicate name (%s) in queries. Each query name should be unique.", map_item.second.name.c_str());
-			return controller_interface::CallbackReturn::ERROR;
-		}
-	}
-	
 	return controller_interface::CallbackReturn::SUCCESS;
 }
 
@@ -61,7 +18,7 @@ controller_interface::CallbackReturn RoboteqBroadcaster::on_configure(const rclc
 	hardware_name_ = get_node()->get_parameter("hardware_name").as_string();
 	if (hardware_name_.empty())
 	{
-		RCLCPP_ERROR(LOGGER, "'hardware_name' parameter is empty. Set it to the name of the Roboteq ros2_control hardware component.");
+		RCLCPP_ERROR(get_node()->get_logger(), "'hardware_name' parameter is empty. Set it to the name of the Roboteq ros2_control hardware component.");
 		return controller_interface::CallbackReturn::ERROR;
 	}
 
@@ -70,79 +27,63 @@ controller_interface::CallbackReturn RoboteqBroadcaster::on_configure(const rclc
 
 controller_interface::CallbackReturn RoboteqBroadcaster::on_activate(const rclcpp_lifecycle::State & /*previous_state*/)
 {
-	if (state_interfaces_.empty())
+	// Group the query state interfaces of the hardware component by query name.
+	// They are named <hardware_name>/<query_name>_<channel>. The order of ALL interfaces is not
+	// guaranteed, so the channels are sorted by their index.
+	std::map<std::string, std::map<size_t, size_t>> queries;  // query name -> channel -> index in state_interfaces_
+	for (size_t i = 0; i < state_interfaces_.size(); ++i)
 	{
-		RCLCPP_ERROR(LOGGER, "None of requested interfaces exist. Broadcaster will not run.");
-    	return CallbackReturn::ERROR;
-	}
-	
-	int requested_interfaces_number{0};
-	for (const auto& map_item : params_.queries.queries_list_map)
-	{
-		requested_interfaces_number += map_item.second.size;
-	}
-
-	if (state_interfaces_.size() != static_cast<size_t>(requested_interfaces_number))
-	{
-		RCLCPP_WARN(LOGGER,	"Not all requested interfaces exists. Check ControllerManager output for more detailed information.");
-	}
-	
-	int state_interface_counter = 0;
-	std::vector<std::string> queries_visited;
-	for (const auto& state_interface : state_interfaces_)
-	{
-		std::string interface_name = state_interface.get_interface_name();
-		std::string del{"_"};
-		size_t del_pos = interface_name.rfind(del);
-		if(del_pos == std::string::npos)
+		const auto& state_interface = state_interfaces_[i];
+		if (state_interface.get_prefix_name() != hardware_name_)
 		{
-			RCLCPP_ERROR(LOGGER, "Interface name %s without '%s' delimiter", interface_name.c_str(), del.c_str());
-			return CallbackReturn::ERROR;
+			continue;
 		}
 
-		std::string query_name = interface_name.substr(0, del_pos);
-		if (std::find(queries_visited.cbegin(), queries_visited.cend(), query_name) == queries_visited.cend())
-		{	
-			cumulative_state_interface_index.push_back(state_interface_counter);
-			queries_visited.push_back(query_name);
+		const std::string interface_name = state_interface.get_interface_name();
+		const size_t del_pos = interface_name.rfind('_');
+		if (del_pos == std::string::npos || del_pos == 0 || del_pos + 1 == interface_name.size() ||
+			interface_name.find_first_not_of("0123456789", del_pos + 1) != std::string::npos)
+		{
+			RCLCPP_DEBUG(get_node()->get_logger(), "Ignoring state interface %s: not a query interface", state_interface.get_name().c_str());
+			continue;
 		}
-		state_interface_counter++;
+
+		const std::string query_name = interface_name.substr(0, del_pos);
+		const size_t channel = std::stoul(interface_name.substr(del_pos + 1));
+		queries[query_name][channel] = i;
 	}
-	cumulative_state_interface_index.push_back(state_interface_counter);
 
-	for (size_t i = 0; i < queries_visited.size(); i++)
+	if (queries.empty())
 	{
-		int size_found = cumulative_state_interface_index[i+1] - cumulative_state_interface_index[i];
-		// Check if number of state interfaces matches what we expect from that particular query
-		bool found{false};
-		for (const auto& map_item : params_.queries.queries_list_map)
+		RCLCPP_ERROR(get_node()->get_logger(),
+			"No query state interfaces found for hardware component '%s'. Check that 'hardware_name' matches "
+			"the name of the Roboteq <ros2_control> tag and that the component is active.", hardware_name_.c_str());
+		return CallbackReturn::ERROR;
+	}
+
+	for (const auto& [query_name, channels] : queries)
+	{
+		std::vector<size_t> indices;
+		indices.reserve(channels.size());
+		for (const auto& [channel, index] : channels)
 		{
-			if (map_item.second.name == queries_visited[i])
-			{
-				found = true;
-				if (size_found != map_item.second.size)
-				{
-					RCLCPP_ERROR(LOGGER, "Query %s has %d state interfaces associated with it. Expected %ld.", queries_visited[i].c_str(), size_found, map_item.second.size);
-					return CallbackReturn::ERROR;
-				}
-			}
-		}
-		
-		if (!found)
-		{
-			RCLCPP_ERROR(LOGGER, "Query %s was not found in map", queries_visited[i].c_str());
-			return CallbackReturn::ERROR;
+			indices.push_back(index);
 		}
 
-		auto query_publisher = get_node()->create_publisher<roboteq_motor_controller_msgs::msg::Query>("roboteq/" + queries_visited[i], rclcpp::SystemDefaultsQoS());
+		auto query_publisher = get_node()->create_publisher<roboteq_motor_controller_msgs::msg::Query>(
+			hardware_name_ + "/" + query_name, rclcpp::SystemDefaultsQoS());
 		auto realtime_query_publisher = std::make_shared<realtime_tools::RealtimePublisher<roboteq_motor_controller_msgs::msg::Query>>(query_publisher);
 
-		// default initialization for query message
+		// Values stay at 0 until the query is read for the first time
 		roboteq_motor_controller_msgs::msg::Query query_msg;
-		query_msg.data.resize(size_found, kNaN);
+		query_msg.data.resize(indices.size(), 0);
+
+		RCLCPP_INFO(get_node()->get_logger(), "Publishing query '%s' (%zu channels) on %s",
+			query_name.c_str(), indices.size(), query_publisher->get_topic_name());
 
 		realtime_roboteq_publishers_.push_back(realtime_query_publisher);
 		query_msgs_.push_back(query_msg);
+		query_state_interface_indices_.push_back(std::move(indices));
 	}
 
 	return controller_interface::CallbackReturn::SUCCESS;
@@ -156,8 +97,7 @@ controller_interface::CallbackReturn RoboteqBroadcaster::on_deactivate(const rcl
 	}
 	realtime_roboteq_publishers_.clear();
 	query_msgs_.clear();
-
-	cumulative_state_interface_index.clear();
+	query_state_interface_indices_.clear();
 
 	return controller_interface::CallbackReturn::SUCCESS;
 }
@@ -168,13 +108,14 @@ controller_interface::return_type RoboteqBroadcaster::update(const rclcpp::Time 
 	{
 		auto & query_msg = query_msgs_[i];
 		query_msg.header.stamp = time;
-		for (int j = cumulative_state_interface_index[i]; j < cumulative_state_interface_index[i+1]; j++)
+		const auto & indices = query_state_interface_indices_[i];
+		for (size_t j = 0; j < indices.size(); j++)
 		{
 			// keep the previous value if the state interface could not be read this cycle
-			const auto value = state_interfaces_[j].get_optional();
+			const auto value = state_interfaces_[indices[j]].get_optional();
 			if (value.has_value() && !std::isnan(*value))
 			{
-				query_msg.data[j - cumulative_state_interface_index[i]] = static_cast<int64_t>(*value);
+				query_msg.data[j] = static_cast<int64_t>(*value);
 			}
 		}
 
@@ -186,24 +127,14 @@ controller_interface::return_type RoboteqBroadcaster::update(const rclcpp::Time 
 
 controller_interface::InterfaceConfiguration RoboteqBroadcaster::command_interface_configuration() const
 {
-  	return controller_interface::InterfaceConfiguration{controller_interface::interface_configuration_type::NONE};
+	return controller_interface::InterfaceConfiguration{controller_interface::interface_configuration_type::NONE};
 }
 
-controller_interface::InterfaceConfiguration RoboteqBroadcaster::state_interface_configuration()  const
+controller_interface::InterfaceConfiguration RoboteqBroadcaster::state_interface_configuration() const
 {
-
- 	controller_interface::InterfaceConfiguration state_interfaces_config;
-	state_interfaces_config.type = controller_interface::interface_configuration_type::INDIVIDUAL;
-
-	for (auto& map_item : params_.queries.queries_list_map)
-	{
-		for (int i = 0; i < map_item.second.size; ++i)
-		{
-			state_interfaces_config.names.push_back(hardware_name_ + "/" + map_item.second.name + "_" + std::to_string(i));	
-		}
-	}	
-
-  	return state_interfaces_config;
+	// Claim all state interfaces (read-only, so they can be shared with other controllers)
+	// and keep the ones of the hardware component in on_activate
+	return controller_interface::InterfaceConfiguration{controller_interface::interface_configuration_type::ALL};
 }
 
 

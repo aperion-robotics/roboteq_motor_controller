@@ -1,4 +1,4 @@
-/**:
+roboteq_wheel:
   ros__parameters:
     serial:
       port: /dev/ttyS1

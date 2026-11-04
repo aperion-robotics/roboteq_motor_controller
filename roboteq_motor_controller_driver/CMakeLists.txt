@@ -61,7 +61,6 @@ target_include_directories(roboteq_broadcaster_plugin PUBLIC
 )
 target_link_libraries(roboteq_broadcaster_plugin
   PUBLIC
-    roboteq_hardware_interface_parameters
     rclcpp::rclcpp
     rclcpp_lifecycle::rclcpp_lifecycle
     realtime_tools::realtime_tools

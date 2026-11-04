@@ -71,6 +71,11 @@ private:
 		std::vector<double> values;
 		std::vector<hardware_interface::StateInterface::SharedPtr> handles;
 		bool received{false};
+		// Read scheduling: 0 = every read cycle, otherwise the query is sent once its next_due_ns is reached
+		int64_t period_ns{0};
+		int64_t next_due_ns{0};
+		// Whether the query was sent in the current read cycle
+		bool due{false};
 	};
 
 	// Parse a single "<query>=<v1>:<v2>..." response into its query state
@@ -120,7 +125,12 @@ private:
 	QueryState* position_query_{nullptr};
 	QueryState* velocity_query_{nullptr};
 	QueryState* effort_query_{nullptr};
+	// Queries in queries_list order, so that read() doesn't need map lookups
+	std::vector<std::pair<std::string, QueryState*>> ordered_queries_;
+	// Rebuilt every read cycle from the queries that are due
 	std::string serial_query_;
+	std::vector<std::string> expected_response_list_;
+	size_t queries_due_{0};
 	std::string serial_command_;
 	std::vector<std::string> queries_response_list_;
 	size_t queries_received_{0};

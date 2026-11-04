@@ -324,6 +324,7 @@ hardware_interface::CallbackReturn RoboteqHardwareInterface::on_init(const hardw
 		QueryState state;
 		state.name = map_item.name;
 		state.values.assign(map_item.size, kNaN);
+		state.period_ns = map_item.rate > 0.0 ? std::llround(1e9 / map_item.rate) : 0;
 		queries_.emplace(query, std::move(state));
 	}
 
@@ -339,12 +340,29 @@ hardware_interface::CallbackReturn RoboteqHardwareInterface::on_init(const hardw
 		return hardware_interface::CallbackReturn::ERROR;
 	}
 
-	serial_query_.clear();
-	for (const auto& query : params_.queries_list)
+	// The joint states and the relative position used by !PR must be fresh on every cycle
+	for (const auto& [query, state] : {std::pair{position_query, position_query_}, std::pair{velocity_query, velocity_query_},
+		std::pair{effort_query, effort_query_}})
 	{
-		serial_query_ += "?" + query + "_";
+		if (state->period_ns != 0)
+		{
+			RCLCPP_FATAL(get_logger(), "Query '%s' is used for the joint states and must be read every cycle (rate 0).", query.c_str());
+			return hardware_interface::CallbackReturn::ERROR;
+		}
 	}
 
+	ordered_queries_.clear();
+	size_t serial_query_size = 0;
+	for (const auto& query : params_.queries_list)
+	{
+		ordered_queries_.emplace_back(query, &queries_.at(query));
+		serial_query_size += query.size() + 2;
+	}
+
+	// The per cycle request is built in read(), reserve so that it doesn't allocate
+	serial_query_.clear();
+	serial_query_.reserve(serial_query_size);
+	expected_response_list_.reserve(params_.queries_list.size());
 	queries_response_list_.reserve(2 * params_.queries_list.size());
 	serial_command_.reserve(128);
 	pending_serial_command_.reserve(64);
@@ -403,6 +421,8 @@ hardware_interface::CallbackReturn RoboteqHardwareInterface::on_configure(const 
 
 		for (auto& [query, state] : queries_)
 		{
+			// Read every query on the first cycle
+			state.next_due_ns = 0;
 			state.handles.clear();
 			for (size_t i = 0; i < state.values.size(); ++i)
 			{
@@ -531,7 +551,12 @@ void RoboteqHardwareInterface::handle_response(std::string_view line)
 	}
 
 	QueryState& state = query_it->second;
-	queries_response_list_.push_back(query_it->first);
+	// Late replies to queries that were not sent this cycle are still used, but must not end the wait early nor be
+	// reported as out of order
+	if (state.due)
+	{
+		queries_response_list_.push_back(query_it->first);
+	}
 
 	// Parse "v1:v2:..."
 	std::string_view data = line.substr(del_pos + 1);
@@ -565,7 +590,10 @@ void RoboteqHardwareInterface::handle_response(std::string_view line)
 	if (!state.received)
 	{
 		state.received = true;
-		++queries_received_;
+		if (state.due)
+		{
+			++queries_received_;
+		}
 	}
 
 	// The relative counts are reset on every query, accumulate every response so that none are lost or counted twice
@@ -578,7 +606,7 @@ void RoboteqHardwareInterface::handle_response(std::string_view line)
 	}
 }
 
-hardware_interface::return_type RoboteqHardwareInterface::read(const rclcpp::Time & /*time*/, const rclcpp::Duration & /*period*/)
+hardware_interface::return_type RoboteqHardwareInterface::read(const rclcpp::Time & time, const rclcpp::Duration & /*period*/)
 {
 	// Never block the control loop: if the command service is using the port, skip this cycle and keep the last states.
 	// No counts are lost since the relative position query accumulates them until the next read.
@@ -595,9 +623,32 @@ hardware_interface::return_type RoboteqHardwareInterface::read(const rclcpp::Tim
 		return hardware_interface::return_type::ERROR;
 	}
 
-	for (auto& [query, state] : queries_)
+	// Build the request from the queries that are due. The schedule only advances when a query is actually sent,
+	// so a skipped cycle delays slow queries to the next one instead of losing them
+	const int64_t now = time.nanoseconds();
+	serial_query_.clear();
+	expected_response_list_.clear();
+	queries_due_ = 0;
+	for (auto& [query, state] : ordered_queries_)
 	{
-		state.received = false;
+		state->received = false;
+		state->due = state->period_ns == 0 || now >= state->next_due_ns;
+		if (!state->due)
+		{
+			continue;
+		}
+		if (state->period_ns > 0)
+		{
+			state->next_due_ns += state->period_ns;
+			// Resync after the first read or late cycles instead of sending a burst to catch up
+			if (state->next_due_ns <= now)
+			{
+				state->next_due_ns = now + state->period_ns;
+			}
+		}
+		serial_query_.append("?").append(query).append("_");
+		expected_response_list_.push_back(query);
+		++queries_due_;
 	}
 	queries_received_ = 0;
 	queries_response_list_.clear();
@@ -615,7 +666,7 @@ hardware_interface::return_type RoboteqHardwareInterface::read(const rclcpp::Tim
 	bool timed_out = false;
 	while (true)
 	{
-		const bool wait = !timed_out && queries_received_ < queries_.size();
+		const bool wait = !timed_out && queries_received_ < queries_due_;
 		std::string_view line;
 		const auto result = serial_port_.read_line(line, wait ? deadline : std::chrono::steady_clock::now(), serial_error_);
 		if (result == SerialPort::ReadResult::ERROR)
@@ -641,11 +692,11 @@ hardware_interface::return_type RoboteqHardwareInterface::read(const rclcpp::Tim
 		return hardware_interface::return_type::OK;
 	}
 
-	if (queries_response_list_ != params_.queries_list)
+	if (queries_response_list_ != expected_response_list_)
 	{
 		std::string expected;
 		std::string actual;
-		for (const auto &s : params_.queries_list) expected += s + " ";
+		for (const auto &s : expected_response_list_) expected += s + " ";
 		for (const auto &s : queries_response_list_) actual += s + " ";
 		RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), kThrottleMs, "The queries response did not match the expected one. Expected: %s Got: %s",
 			expected.c_str(), actual.c_str());

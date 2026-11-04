@@ -1,7 +1,7 @@
 /**:
   ros__parameters:
     serial:
-      port: /dev/ttyROBOTEQ
+      port: /dev/ttyS1
       baud: 115200
       timeout_ms: 10 # time to wait for the queries responses in each read cycle
 
@@ -24,6 +24,7 @@
     
     queries_list: ["CR", "S", "A", "FS", "FF", "FM"]
 
+    # Optional per query "rate" [Hz]: 0 (default) = every read cycle. The position, velocity and effort queries must stay at 0
     queries:
       CR:
         name: "encoder_count_relative"
@@ -37,9 +38,12 @@
       FF:
         name: "fault_flag"
         size: 1
+        rate: 1.0
       FS:
         name: "status_flag"
         size: 1
+        rate: 1.0
       FM:
         name: "runtime_status_flag"
         size: 1
+        rate: 1.0

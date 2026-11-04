@@ -124,3 +124,12 @@ roboteq_motor_controller_driver:
           gt<>: [0],
         }
       }
+      rate: {
+        type: double,
+        default_value: 0.0,
+        read_only: true,
+        description: "Read rate of the query [Hz]. 0 = every read cycle. Rates above the controller manager rate are read every cycle. Must be 0 for the position, velocity and effort queries",
+        validation: {
+          gt_eq<>: [0.0],
+        }
+      }

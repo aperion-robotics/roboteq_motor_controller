@@ -26,7 +26,6 @@ diff_drive_controller:
     right_wheel_names: ["right_wheel_joint"]
 
     wheel_separation: 0.561
-    wheels_per_side: 1
     wheel_radius: 0.07
 
     wheel_separation_multiplier: 1.0
